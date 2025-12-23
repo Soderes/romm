@@ -182,6 +182,18 @@ async function getRom({
   return api.get(`/roms/${romId}`);
 }
 
+async function getRomByMetadataProvider({
+  field,
+  id,
+}: {
+  field: Partial<keyof DetailedRom>;
+  id: number;
+}): Promise<{ data: DetailedRom }> {
+  return api.get(`/roms/by-metadata-provider/`, {
+    params: { [field]: id },
+  });
+}
+
 async function searchRom({
   romId,
   searchTerm,
@@ -483,6 +495,7 @@ export default {
   getRecentRoms,
   getRecentPlayedRoms,
   getRom,
+  getRomByMetadataProvider,
   downloadRom,
   bulkDownloadRoms,
   searchRom,

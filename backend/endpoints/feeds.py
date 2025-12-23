@@ -215,7 +215,7 @@ async def tinfoil_index_feed(
                 size=rom_file.file_size_bytes,
             )
             for rom in roms
-            for rom_file in db_rom_handler.get_rom_files(rom.id)
+            for rom_file in rom.files
             if rom_file.file_extension in ["xci", "nsp", "nsz", "xcz", "nro"]
         ],
         directories=[],
@@ -298,7 +298,7 @@ def pkgi_ps3_feed(
     txt_lines = []
 
     for rom in roms:
-        for file in db_rom_handler.get_rom_files(rom.id):
+        for file in rom.files:
             if not validate_pkgi_file(file, content_type_enum):
                 continue
 
@@ -369,7 +369,7 @@ def pkgi_psvita_feed(
     txt_lines = []
 
     for rom in roms:
-        for file in db_rom_handler.get_rom_files(rom.id):
+        for file in rom.files:
             if not validate_pkgi_file(file, content_type_enum):
                 continue
 
@@ -440,7 +440,7 @@ def pkgi_psp_feed(
     txt_lines = []
 
     for rom in roms:
-        for file in db_rom_handler.get_rom_files(rom.id):
+        for file in rom.files:
             if not validate_pkgi_file(file, content_type_enum):
                 continue
 
@@ -555,7 +555,9 @@ def kekatsu_ds_feed(request: Request, platform_slug: str) -> Response:
 
     txt_lines = []
     txt_lines.append("1")  # Database version
-    txt_lines.append("  ")
+    txt_lines.append(
+        "\t"
+    )  # Delimiter (cannot use csv (coma) as kekatsu does not support " (double quotes) as a text delimiter)
 
     for rom in roms:
         download_url = generate_rom_download_url(request, rom)
@@ -580,8 +582,8 @@ def kekatsu_ds_feed(request: Request, platform_slug: str) -> Response:
             box_art_url=box_art_url,
         )
 
-        # Format: title,platform,region,version,author,download_url,filename,size,box_art_url
-        txt_line = f'"{kekatsu_item.title}" {kekatsu_item.platform} {kekatsu_item.region}   {kekatsu_item.version}    {kekatsu_item.author}  "{kekatsu_item.download_url}"    "{kekatsu_item.filename}"  {kekatsu_item.size}  "{kekatsu_item.box_art_url}"'
+        # Format: title	platform	region	version	author	download_url	filename	size	box_art_url
+        txt_line = f"{kekatsu_item.title}\t{kekatsu_item.platform}\t{kekatsu_item.region}\t{kekatsu_item.version}\t{kekatsu_item.author}\t{kekatsu_item.download_url}\t{kekatsu_item.filename}\t{kekatsu_item.size}\t{kekatsu_item.box_art_url}"
         txt_lines.append(txt_line)
 
     txt_content = "\n".join(txt_lines)

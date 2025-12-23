@@ -62,7 +62,6 @@
   "remove-from-favorites": "Remove from favourites",
   "remove-from-playing": "Remove from playing",
   "removing-from-collection": "Removing {n} ROMs from collection",
-  "removing-from-filesystem": "Removing from filesystem",
   "removing-title": "Removing {n} game from RomM | Removing {n} games from RomM",
   "rename-file-details": "File will be renamed from {from} to {to}. File tags won't be affected.",
   "rename-file-title": "Rename file to match {source} title",
@@ -93,5 +92,14 @@
   "confirm-delete-note": "Are you sure you want to delete the note \"{title}\"?",
   "unmatch-success": "ROM unmatched successfully",
   "update-success": "ROM updated successfully!",
-  "warning": "WARNING:"
+  "save-data": "Save data",
+  "status-backlogged": "Backlogged",
+  "status-now-playing": "Now Playing",
+  "status-incomplete": "Incomplete",
+  "status-finished": "Finished",
+  "status-completed-100": "Completed 100%",
+  "status-retired": "Retired",
+  "status-never-playing": "Never Playing",
+  "status-hidden": "Hidden",
+  "updated": "Updated"
 }

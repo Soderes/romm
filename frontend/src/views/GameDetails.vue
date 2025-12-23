@@ -204,7 +204,7 @@ watch(
             <v-tab v-if="currentRom.has_manual" value="manual">
               {{ t("rom.manual") }}
             </v-tab>
-            <v-tab value="gamedata"> Game data </v-tab>
+            <v-tab value="gamedata">{{ t("rom.save-data") }}</v-tab>
             <v-tab value="personal">
               {{ t("rom.personal") }}
             </v-tab>
@@ -289,7 +289,7 @@ watch(
         "
         cols="auto"
       >
-        <v-container width="270px" class="pa-0">
+        <v-container class="pa-0">
           <AdditionalContent class="mt-2" :rom="currentRom" />
         </v-container>
       </v-col>

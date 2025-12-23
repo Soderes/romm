@@ -15,16 +15,20 @@ from config import (
     OIDC_ROLE_ADMIN,
     OIDC_ROLE_EDITOR,
     OIDC_ROLE_VIEWER,
+    OIDC_USERNAME_ATTRIBUTE,
     ROMM_AUTH_SECRET_KEY,
     ROMM_BASE_URL,
 )
 from decorators.auth import oauth
 from exceptions.auth_exceptions import OAuthCredentialsException, UserDisabledException
 from handler.auth.constants import ALGORITHM, DEFAULT_OAUTH_TOKEN_EXPIRY, TokenPurpose
+from handler.auth.middleware.redis_session_middleware import RedisSessionMiddleware
 from handler.redis_handler import redis_client
 from logger.formatter import CYAN
 from logger.formatter import highlight as hl
 from logger.logger import log
+
+oct_key = OctKey.import_key(ROMM_AUTH_SECRET_KEY)
 
 
 class AuthHandler:
@@ -95,7 +99,7 @@ class AuthHandler:
         token = jwt.encode(
             {"alg": ALGORITHM},
             to_encode,
-            OctKey.import_key(ROMM_AUTH_SECRET_KEY),
+            oct_key,
         )
         log.info(
             f"Reset password link requested for {hl(user.username, color=CYAN)}. Reset link: {hl(f'{ROMM_BASE_URL}/reset-password?token={token}')}"
@@ -119,7 +123,7 @@ class AuthHandler:
         from handler.database import db_user_handler
 
         try:
-            payload = jwt.decode(token, ROMM_AUTH_SECRET_KEY, algorithms=[ALGORITHM])
+            payload = jwt.decode(token, oct_key, algorithms=[ALGORITHM])
         except (BadSignatureError, DecodeError, ValueError) as exc:
             raise HTTPException(status_code=400, detail="Invalid token") from exc
 
@@ -146,12 +150,12 @@ class AuthHandler:
             raise HTTPException(status_code=404, detail="User not found")
 
         now = datetime.now(timezone.utc).timestamp()
-        if now > payload.claims.get("exp"):
+        if now > payload.claims.get("exp", 0.0):
             raise HTTPException(status_code=400, detail="Token has expired")
 
         return user
 
-    def set_user_new_password(self, user: Any, new_password: str) -> None:
+    async def set_user_new_password(self, user: Any, new_password: str) -> None:
         """
         Set the new password for the user.
         Args:
@@ -163,6 +167,7 @@ class AuthHandler:
         db_user_handler.update_user(
             user.id, {"hashed_password": self.get_password_hash(new_password)}
         )
+        await RedisSessionMiddleware.clear_user_sessions(user.username)
 
     def generate_invite_link_token(self, user: Any, role: str) -> str:
         """
@@ -192,7 +197,7 @@ class AuthHandler:
         token = jwt.encode(
             {"alg": ALGORITHM},
             to_encode,
-            OctKey.import_key(ROMM_AUTH_SECRET_KEY),
+            oct_key,
         )
         invite_link = f"{ROMM_BASE_URL}/register?token={token}"
         log.info(
@@ -203,18 +208,18 @@ class AuthHandler:
         )
         return token
 
-    def verify_invite_link_token(self, token: str) -> tuple[str, str]:
+    def consume_invite_link_token(self, token: str) -> str:
         """
-        Verify the invite link token.
+        Verify and consume the invite link token, which invalidates the token to prevent reuse.
+
         Args:
             token (str): The token to verify.
+
         Returns:
-            str: The JTI (JWT ID) of the token.
+            str: The role associated with the token.
         """
         try:
-            payload = jwt.decode(
-                token, OctKey.import_key(ROMM_AUTH_SECRET_KEY), algorithms=[ALGORITHM]
-            )
+            payload = jwt.decode(token, oct_key, algorithms=[ALGORITHM])
         except (BadSignatureError, DecodeError, ValueError) as exc:
             raise HTTPException(status_code=400, detail="Invalid token") from exc
 
@@ -231,15 +236,11 @@ class AuthHandler:
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail="Invite token has already been used or is invalid.",
             )
-        return jti, role
 
-    def invalidate_invite_link_token(self, jti: str) -> None:
-        """
-        Invalidate the invite link token.
-        Args:
-            jti (str): The JTI (JWT ID) of the token to invalidate.
-        """
+        # Invalidate the token as soon as it's read
         redis_client.delete(f"invite-jti:{jti}")
+
+        return role
 
 
 class OAuthHandler:
@@ -256,16 +257,14 @@ class OAuthHandler:
         return jwt.encode(
             {"alg": ALGORITHM},
             to_encode,
-            OctKey.import_key(ROMM_AUTH_SECRET_KEY),
+            oct_key,
         )
 
     async def get_current_active_user_from_bearer_token(self, token: str):
         from handler.database import db_user_handler
 
         try:
-            payload = jwt.decode(
-                token, OctKey.import_key(ROMM_AUTH_SECRET_KEY), algorithms=[ALGORITHM]
-            )
+            payload = jwt.decode(token, oct_key, algorithms=[ALGORITHM])
         except (BadSignatureError, DecodeError, ValueError) as exc:
             raise OAuthCredentialsException from exc
 
@@ -311,7 +310,7 @@ class OpenIDHandler:
                 detail="Email is missing from token.",
             )
 
-        metadata = await oauth.openid.load_server_metadata()
+        metadata = await oauth.openid.load_server_metadata()  # type: ignore
         claims_supported = metadata.get("claims_supported")
         is_email_verified = userinfo.get("email_verified", None)
 
@@ -328,7 +327,13 @@ class OpenIDHandler:
                 detail="Email is not verified.",
             )
 
-        preferred_username = userinfo.get("preferred_username")
+        preferred_username = userinfo.get(OIDC_USERNAME_ATTRIBUTE)
+        if preferred_username is None:
+            log.error(f"'{OIDC_USERNAME_ATTRIBUTE}' attribute is missing from token.")
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"'{OIDC_USERNAME_ATTRIBUTE}' attribute is missing from token.",
+            )
 
         role = Role.VIEWER
         if OIDC_CLAIM_ROLES and OIDC_CLAIM_ROLES in userinfo:
