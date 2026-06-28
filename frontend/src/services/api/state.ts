@@ -1,31 +1,45 @@
-import type { StateSchema } from "@/__generated__";
+import type {
+  Body_add_state_api_states_post as AddStateInput,
+  Body_update_state_api_states__id__put as UpdateStateInput,
+  DetailedRomSchema,
+  StateSchema,
+} from "@/__generated__";
 import api from "@/services/api";
-import type { DetailedRom } from "@/stores/roms";
+import { buildFormInput } from "@/utils/formData";
 
 export const stateApi = api;
+
+type StateUploadInput = Omit<AddStateInput, "stateFile" | "screenshotFile"> & {
+  stateFile: File;
+  screenshotFile?: File;
+};
+
+type UpdateStateUploadInput = Omit<
+  UpdateStateInput,
+  "stateFile" | "screenshotFile"
+> & {
+  stateFile: File;
+  screenshotFile?: File;
+};
 
 async function uploadStates({
   rom,
   statesToUpload,
   emulator,
 }: {
-  rom: DetailedRom;
-  statesToUpload: {
-    stateFile: File;
-    screenshotFile?: File;
-  }[];
+  rom: DetailedRomSchema;
+  statesToUpload: StateUploadInput[];
   emulator?: string;
-}): Promise<PromiseSettledResult<StateSchema>[]> {
+}) {
   const promises = statesToUpload.map(({ stateFile, screenshotFile }) => {
-    const formData = new FormData();
-    formData.append("stateFile", stateFile);
-    if (screenshotFile) {
-      formData.append("screenshotFile", screenshotFile);
-    }
+    const formData = buildFormInput<StateUploadInput>([
+      ["stateFile", stateFile],
+      ["screenshotFile", screenshotFile],
+    ]);
 
     return new Promise<StateSchema>((resolve, reject) => {
       api
-        .post("/states", formData, {
+        .post<StateSchema>("/states", formData, {
           headers: {
             "Content-Type": "multipart/form-data",
           },
@@ -47,23 +61,32 @@ async function updateState({
   screenshotFile,
 }: {
   state: StateSchema;
-  stateFile: File;
-  screenshotFile?: File;
-}): Promise<{ data: StateSchema }> {
-  const formData = new FormData();
-  formData.append("stateFile", stateFile);
-  if (screenshotFile) formData.append("screenshotFile", screenshotFile);
+  stateFile: UpdateStateUploadInput["stateFile"];
+  screenshotFile?: UpdateStateUploadInput["screenshotFile"];
+}) {
+  const formData = buildFormInput<UpdateStateUploadInput>([
+    ["stateFile", stateFile],
+    ["screenshotFile", screenshotFile],
+  ]);
 
-  return api.put(`/states/${state.id}`, formData);
+  return api.put<StateSchema>(`/states/${state.id}`, formData);
 }
 
-async function deleteStates({
-  states,
-}: {
-  states: StateSchema[];
-}): Promise<{ data: number[] }> {
-  return api.post("/states/delete", {
+async function deleteStates({ states }: { states: StateSchema[] }) {
+  return api.post<number[]>("/states/delete", {
     states: states.map((s) => s.id),
+  });
+}
+
+async function setStateVisibility({
+  id,
+  isPublic,
+}: {
+  id: number;
+  isPublic: boolean;
+}) {
+  return api.put<StateSchema>(`/states/${id}/visibility`, {
+    is_public: isPublic,
   });
 }
 
@@ -71,4 +94,5 @@ export default {
   uploadStates,
   updateState,
   deleteStates,
+  setStateVisibility,
 };

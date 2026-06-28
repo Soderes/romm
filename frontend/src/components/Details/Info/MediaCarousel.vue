@@ -18,12 +18,11 @@ const props = withDefaults(defineProps<Props>(), {
   enableClick: false,
 });
 
-const youtubeVideoId = computed(() => props.rom.youtube_video_id);
-const localVideoPath = computed(() => {
-  return (
-    props.rom.ss_metadata?.video_path || props.rom.gamelist_metadata?.video_path
-  );
-});
+const youtubeVideoId = computed(
+  () =>
+    props.rom.manual_metadata?.youtube_video_id || props.rom.youtube_video_id,
+);
+
 const screenshots = computed(() => props.rom.merged_screenshots);
 const mediaPaths = computed(() => {
   const ss = props.rom.ss_metadata;
@@ -70,11 +69,7 @@ const carouselHeight = computed(() => {
     :height="carouselHeight"
   >
     <template #prev="{ props: prevProps }">
-      <v-btn
-        icon="mdi-chevron-left"
-        class="translucent"
-        @click="prevProps.onClick"
-      />
+      <v-btn icon="mdi-chevron-left" @click="prevProps.onClick" />
     </template>
     <v-carousel-item
       v-if="youtubeVideoId"
@@ -85,20 +80,29 @@ const carouselHeight = computed(() => {
         height="100%"
         width="100%"
         :src="`${heartbeat.FRONTEND.YOUTUBE_BASE_URL}/embed/${youtubeVideoId}`"
+        credentialless
         title="YouTube video player"
         frameborder="0"
-        allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture; web-share"
+        allow="
+          accelerometer;
+          autoplay;
+          clipboard-write;
+          encrypted-media;
+          gyroscope;
+          picture-in-picture;
+          web-share;
+        "
         referrerpolicy="strict-origin-when-cross-origin"
         allowfullscreen
       />
     </v-carousel-item>
     <v-carousel-item
-      v-if="localVideoPath"
-      :key="localVideoPath"
+      v-if="rom.path_video"
+      :key="rom.path_video"
       content-class="d-flex justify-center align-center"
     >
       <video
-        :src="`${FRONTEND_RESOURCES_PATH}/${localVideoPath}`"
+        :src="`${FRONTEND_RESOURCES_PATH}/${rom.path_video}`"
         class="h-full object-contain"
         controls
       />
@@ -120,11 +124,7 @@ const carouselHeight = computed(() => {
       />
     </template>
     <template #next="{ props: nextProps }">
-      <v-btn
-        icon="mdi-chevron-right"
-        class="translucent"
-        @click="nextProps.onClick"
-      />
+      <v-btn icon="mdi-chevron-right" @click="nextProps.onClick" />
     </template>
   </v-carousel>
 </template>

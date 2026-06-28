@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { useLocalStorage } from "@vueuse/core";
+import { useEventListener, useLocalStorage } from "@vueuse/core";
 import type { Emitter } from "mitt";
 import { storeToRefs } from "pinia";
 import { computed, inject, onBeforeUnmount, onMounted, ref, watch } from "vue";
@@ -20,6 +20,7 @@ import type { Events } from "@/types/emitter";
 import { getSupportedEJSCores } from "@/utils";
 import CacheDialog from "@/views/Player/EmulatorJS/CacheDialog.vue";
 import Player from "@/views/Player/EmulatorJS/Player.vue";
+import { installIOSFullscreenShim } from "./utils";
 
 const { t } = useI18n();
 const { xs, mdAndUp, smAndDown } = useDisplay();
@@ -38,8 +39,18 @@ const selectedDisc = ref<number | null>(null);
 const selectedCore = ref<string | null>(null);
 const selectedFirmware = ref<FirmwareSchema | null>(null);
 const supportedCores = ref<string[]>([]);
+const removeIOSFullscreenShim = ref<(() => void) | null>(null);
 const gameRunning = ref(false);
 const fullScreenOnPlay = useLocalStorage("emulation.fullScreenOnPlay", true);
+
+declare global {
+  interface Navigator {
+    keyboard: {
+      lock: (keys: string[]) => Promise<void>;
+      unlock: () => void;
+    };
+  }
+}
 
 const compatibleStates = computed(
   () =>
@@ -49,6 +60,9 @@ const compatibleStates = computed(
 );
 
 async function onPlay() {
+  removeIOSFullscreenShim.value?.();
+  removeIOSFullscreenShim.value = installIOSFullscreenShim();
+
   if (rom.value && auth.scopes.includes("roms.user.write")) {
     romApi.updateUserRomProps({
       romId: rom.value.id,
@@ -93,6 +107,8 @@ async function onPlay() {
     playing.value = true;
     fullScreen.value = fullScreenOnPlay.value;
   } catch (err) {
+    removeIOSFullscreenShim.value?.();
+    removeIOSFullscreenShim.value = null;
     console.error("[Play] Emulator load failure:", err);
   }
 }
@@ -167,11 +183,28 @@ onMounted(async () => {
   });
   firmwareOptions.value = firmwareResponse.data;
 
-  supportedCores.value = [...getSupportedEJSCores(rom.value.platform_slug)];
+  supportedCores.value = [
+    ...getSupportedEJSCores(
+      rom.value.platform_slug,
+      configStore.config.EJS_NETPLAY_ENABLED,
+    ),
+  ];
 
   // Listen for save/state selection from dialogs
   emitter?.on("saveSelected", selectSave);
   emitter?.on("stateSelected", selectState);
+
+  if ("keyboard" in navigator) {
+    useEventListener(document, "fullscreenchange", () => {
+      if (document.fullscreenElement) {
+        navigator.keyboard
+          .lock(["Escape", "Tab", "AltLeft", "ControlLeft", "MetaLeft"])
+          .catch(() => {});
+      } else {
+        navigator.keyboard.unlock();
+      }
+    });
+  }
 
   // Determine default tab and selection (mutually exclusive)
   const compatibleStates = rom.value.user_states.filter(
@@ -196,9 +229,11 @@ onMounted(async () => {
   }
 
   const storedDisc = localStorage.getItem(`player:${rom.value.id}:disc`);
-  if (storedDisc) {
-    selectedDisc.value = parseInt(storedDisc);
+  const storedDiscId = storedDisc ? parseInt(storedDisc) : null;
+  if (storedDiscId && rom.value.files.some((f) => f.id === storedDiscId)) {
+    selectedDisc.value = storedDiscId;
   } else {
+    if (storedDisc) localStorage.removeItem(`player:${rom.value.id}:disc`);
     selectedDisc.value = rom.value.files[0]?.id ?? null;
   }
 
@@ -212,18 +247,34 @@ onMounted(async () => {
     selectedCore.value = supportedCores.value[0];
   }
 
+  const coreOptions = configStore.getEJSCoreOptions(selectedCore.value);
   const storedBiosID = localStorage.getItem(
     `player:${rom.value.platform_slug}:bios_id`,
   );
-  if (storedBiosID) {
-    selectedFirmware.value =
-      firmwareOptions.value.find((f) => f.id === parseInt(storedBiosID)) ??
-      null;
-  }
+
+  const biosFromStorage = storedBiosID
+    ? firmwareOptions.value.find((f) => f.id === parseInt(storedBiosID))
+    : undefined;
+
+  // Use default bios file if set in config.yml
+  const biosFromConfig = coreOptions["bios_file"]
+    ? firmwareOptions.value.find(
+        (f) => f.file_name === coreOptions["bios_file"],
+      )
+    : undefined;
+
+  // Auto-select firmware if only one option is available
+  const biosFromSingleOption =
+    firmwareOptions.value.length === 1 ? firmwareOptions.value[0] : undefined;
+
+  selectedFirmware.value =
+    biosFromStorage ?? biosFromConfig ?? biosFromSingleOption ?? null;
 });
 
 onBeforeUnmount(async () => {
   window.EJS_emulator?.callEvent("exit");
+  removeIOSFullscreenShim.value?.();
+  removeIOSFullscreenShim.value = null;
   emitter?.off("saveSelected", selectSave);
   emitter?.off("stateSelected", selectState);
 });
@@ -304,6 +355,51 @@ function openCacheDialog() {
             <v-divider />
 
             <v-card-text class="pa-4" style="min-height: 200px">
+              <!-- Saves Tab Content -->
+              <div v-show="isSavesTabSelected">
+                <!-- Selected Save Preview -->
+                <div v-if="selectedSave" class="mb-3">
+                  <AssetCard
+                    :asset="selectedSave"
+                    type="save"
+                    :show-hover-actions="false"
+                    :show-close-button="true"
+                    :transform-scale="false"
+                    @close="unselectSave"
+                  />
+                </div>
+
+                <!-- No Save Selected Message -->
+                <div v-else class="text-center py-8">
+                  <v-icon size="48" color="medium-emphasis"
+                    >mdi-content-save-outline</v-icon
+                  >
+                  <p class="text-body-2 text-medium-emphasis mt-2">
+                    {{ t("play.no-save-selected") }}
+                  </p>
+                </div>
+
+                <!-- Select Save Button -->
+                <v-btn
+                  block
+                  variant="tonal"
+                  color="primary"
+                  :prepend-icon="
+                    selectedSave ? 'mdi-swap-horizontal' : 'mdi-plus'
+                  "
+                  :disabled="rom.user_saves.length == 0"
+                  @click="openSaveDialog"
+                >
+                  {{
+                    rom.user_saves.length == 0
+                      ? t("play.no-saves-available")
+                      : selectedSave
+                        ? t("play.change-save")
+                        : t("play.select-save")
+                  }}
+                </v-btn>
+              </div>
+
               <!-- States Tab Content -->
               <div v-show="!isSavesTabSelected">
                 <!-- Selected State Preview -->
@@ -344,49 +440,13 @@ function openCacheDialog() {
                   @click="openStateDialog"
                 >
                   {{
-                    selectedState
-                      ? t("play.change-state")
-                      : t("play.select-state")
-                  }}
-                </v-btn>
-              </div>
-
-              <!-- Saves Tab Content -->
-              <div v-show="isSavesTabSelected">
-                <!-- Selected Save Preview -->
-                <div v-if="selectedSave" class="mb-3">
-                  <AssetCard
-                    :asset="selectedSave"
-                    type="save"
-                    :show-hover-actions="false"
-                    :show-close-button="true"
-                    :transform-scale="false"
-                    @close="unselectSave"
-                  />
-                </div>
-
-                <!-- No Save Selected Message -->
-                <div v-else class="text-center py-8">
-                  <v-icon size="48" color="medium-emphasis"
-                    >mdi-content-save-outline</v-icon
-                  >
-                  <p class="text-body-2 text-medium-emphasis mt-2">
-                    {{ t("play.no-save-selected") }}
-                  </p>
-                </div>
-
-                <!-- Select Save Button -->
-                <v-btn
-                  block
-                  variant="tonal"
-                  color="primary"
-                  :prepend-icon="
-                    selectedSave ? 'mdi-swap-horizontal' : 'mdi-plus'
-                  "
-                  @click="openSaveDialog"
-                >
-                  {{
-                    selectedSave ? t("play.change-save") : t("play.select-save")
+                    !rom.user_states.some(
+                      (s) => !s.emulator || s.emulator === selectedCore,
+                    )
+                      ? t("play.no-states-available")
+                      : selectedState
+                        ? t("play.change-state")
+                        : t("play.select-state")
                   }}
                 </v-btn>
               </div>
@@ -401,7 +461,7 @@ function openCacheDialog() {
               <!-- Configuration Section -->
               <!-- Disc Selector -->
               <v-select
-                v-if="rom.has_multiple_files"
+                v-if="rom.files.length > 1"
                 v-model="selectedDisc"
                 class="mb-3"
                 hide-details
@@ -457,7 +517,7 @@ function openCacheDialog() {
 
               <v-divider
                 v-if="
-                  rom.has_multiple_files ||
+                  rom.files.length > 1 ||
                   supportedCores.length > 1 ||
                   firmwareOptions.length > 0
                 "

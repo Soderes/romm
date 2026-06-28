@@ -2,16 +2,9 @@ from unittest.mock import Mock, patch
 
 import pytest
 from fastapi import status
-from fastapi.testclient import TestClient
-from main import app
+from rq.exceptions import NoSuchJobError
 
 from tasks.tasks import Task, TaskType
-
-
-@pytest.fixture
-def client():
-    with TestClient(app) as client:
-        yield client
 
 
 @pytest.fixture
@@ -61,7 +54,7 @@ def create_mock_job(job_id="1", status="queued"):
     from datetime import datetime
 
     mock_job = Mock()
-    mock_job.get_id.return_value = job_id
+    mock_job.id = job_id
     mock_job.get_status.return_value = status
 
     # Create mock datetime objects with isoformat methods
@@ -196,151 +189,15 @@ class TestListTasks:
             "sub": admin_user.username,
             "iss": "romm:oauth",
             "scopes": "roms:read",  # Missing TASKS_RUN scope
-            "type": "access",
         }
 
-        token = oauth_handler.create_oauth_token(
+        token = oauth_handler.create_access_token(
             data=data, expires_delta=timedelta(minutes=30)
         )
 
         response = client.get(
             "/api/tasks", headers={"Authorization": f"Bearer {token}"}
         )
-        assert response.status_code == status.HTTP_403_FORBIDDEN
-
-
-class TestRunAllTasks:
-    """Test suite for the run_all_tasks endpoint"""
-
-    @patch("endpoints.tasks.low_prio_queue.enqueue", return_value=create_mock_job())
-    @patch(
-        "endpoints.tasks.manual_tasks",
-        [
-            {
-                "name": "task1",
-                "type": TaskType.CLEANUP,
-                "task": Mock(
-                    spec=Task,
-                    task_type=TaskType.CLEANUP,
-                    title="Test Task",
-                    description="Test Description",
-                    enabled=True,
-                    manual_run=True,
-                    run=Mock(),
-                ),
-            },
-            {
-                "name": "task2",
-                "type": TaskType.CLEANUP,
-                "task": Mock(
-                    spec=Task,
-                    task_type=TaskType.CLEANUP,
-                    title="Test Task",
-                    description="Test Description",
-                    enabled=True,
-                    manual_run=True,
-                    run=Mock(),
-                ),
-            },
-        ],
-    )
-    @patch(
-        "endpoints.tasks.scheduled_tasks",
-        [
-            {
-                "name": "task3",
-                "type": TaskType.UPDATE,
-                "task": Mock(
-                    spec=Task,
-                    task_type=TaskType.UPDATE,
-                    title="Update Task",
-                    description="Update Description",
-                    enabled=True,
-                    manual_run=True,
-                    run=Mock(),
-                ),
-            },
-            {
-                "name": "task4",
-                "type": TaskType.UPDATE,
-                "task": Mock(
-                    spec=Task,
-                    task_type=TaskType.UPDATE,
-                    title="Disabled Update Task",
-                    description="Disabled Update Description",
-                    enabled=False,
-                    manual_run=True,
-                    run=Mock(),
-                ),  # Disabled
-            },
-        ],
-    )
-    def test_run_all_tasks_success(self, mock_queue, client, access_token):
-        """Test successful running of all runnable tasks"""
-        response = client.post(
-            "/api/tasks/run", headers={"Authorization": f"Bearer {access_token}"}
-        )
-
-        assert response.status_code == status.HTTP_200_OK
-        data = response.json()
-        assert len(data) == 3
-        assert data[0]["task_name"] == "task1"
-        assert data[1]["task_name"] == "task2"
-        assert data[2]["task_name"] == "task3"
-
-    @patch("endpoints.tasks.low_prio_queue")
-    @patch("endpoints.tasks.manual_tasks", [])
-    @patch("endpoints.tasks.scheduled_tasks", [])
-    def test_run_all_tasks_no_runnable_tasks(self, mock_queue, client, access_token):
-        """Test running all tasks when no tasks are runnable"""
-        response = client.post(
-            "/api/tasks/run", headers={"Authorization": f"Bearer {access_token}"}
-        )
-
-        assert response.status_code == status.HTTP_400_BAD_REQUEST
-        data = response.json()
-        assert data["detail"] == "No runnable tasks available to run"
-
-        # Verify that enqueue was not called
-        mock_queue.assert_not_called()
-
-    @patch("endpoints.tasks.low_prio_queue")
-    @patch(
-        "endpoints.tasks.manual_tasks",
-        [
-            {
-                "name": "task1",
-                "type": TaskType.CLEANUP,
-                "task": Mock(
-                    spec=Task, enabled=True, manual_run=False, run=Mock()
-                ),  # Not manual
-            },
-            {
-                "name": "task2",
-                "type": TaskType.CLEANUP,
-                "task": Mock(
-                    spec=Task, enabled=False, manual_run=True, run=Mock()
-                ),  # Disabled
-            },
-        ],
-    )
-    @patch("endpoints.tasks.scheduled_tasks", [])
-    def test_run_all_tasks_mixed_conditions(self, mock_queue, client, access_token):
-        """Test running all tasks with mixed enabled/disabled and manual/non-manual tasks"""
-        response = client.post(
-            "/api/tasks/run", headers={"Authorization": f"Bearer {access_token}"}
-        )
-
-        assert response.status_code == status.HTTP_400_BAD_REQUEST
-        data = response.json()
-        assert data["detail"] == "No runnable tasks available to run"
-
-        # Verify that enqueue was not called since no tasks are both enabled and manual
-        mock_queue.enqueue.assert_not_called()
-
-    def test_run_all_tasks_unauthorized(self, client):
-        """Test that unauthorized requests are rejected"""
-        response = client.post("/api/tasks/run")
         assert response.status_code == status.HTTP_403_FORBIDDEN
 
 
@@ -466,6 +323,53 @@ class TestRunSingleTask:
         assert response.status_code == status.HTTP_403_FORBIDDEN
 
 
+class TestGetTasksStatus:
+    """Test suite for the get_tasks_status endpoint"""
+
+    @patch("endpoints.tasks.Worker.all", return_value=[])
+    @patch("endpoints.tasks.low_prio_queue")
+    @patch("endpoints.tasks.default_queue")
+    @patch("endpoints.tasks.high_prio_queue")
+    @patch("endpoints.tasks.Job.fetch")
+    def test_get_tasks_status_skips_expired_jobs(
+        self,
+        mock_job_fetch,
+        mock_high_queue,
+        mock_default_queue,
+        mock_low_queue,
+        mock_worker_all,
+        client,
+        access_token,
+    ):
+        """Test that get_tasks_status skips jobs that have expired from Redis"""
+        mock_low_queue.get_jobs.return_value = []
+        mock_default_queue.get_jobs.return_value = []
+        mock_high_queue.get_jobs.return_value = []
+
+        mock_finished_registry = Mock()
+        mock_finished_registry.get_job_ids.return_value = ["expired-job-id"]
+        mock_failed_registry = Mock()
+        mock_failed_registry.get_job_ids.return_value = []
+
+        mock_job_fetch.side_effect = NoSuchJobError(
+            "No such job: rq:job:expired-job-id"
+        )
+
+        with patch(
+            "endpoints.tasks.FinishedJobRegistry", return_value=mock_finished_registry
+        ):
+            with patch(
+                "endpoints.tasks.FailedJobRegistry", return_value=mock_failed_registry
+            ):
+                response = client.get(
+                    "/api/tasks/status",
+                    headers={"Authorization": f"Bearer {access_token}"},
+                )
+
+        assert response.status_code == status.HTTP_200_OK
+        assert response.json() == []
+
+
 class TestGetTaskById:
     """Test suite for the get_task_by_id endpoint"""
 
@@ -491,7 +395,7 @@ class TestGetTaskById:
         }
         mock_job.func_name = "test_task"
         mock_job.get_status.return_value = "finished"
-        mock_job.get_id.return_value = "test-job-id-123"
+        mock_job.id = "test-job-id-123"
         mock_job.result = {"status": "completed"}
 
         mock_job_fetch.return_value = mock_job
@@ -554,7 +458,7 @@ class TestGetTaskById:
         }
         mock_job.func_name = "test_task"
         mock_job.get_status.return_value = "failed"
-        mock_job.get_id.return_value = "failed-job-id"
+        mock_job.id = "failed-job-id"
         mock_job.result = {"error": "Task failed"}
 
         mock_job_fetch.return_value = mock_job

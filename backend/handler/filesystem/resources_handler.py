@@ -4,6 +4,7 @@ from io import BytesIO
 from pathlib import Path
 
 import httpx
+from anyio import Path as AnyioPath
 from fastapi import status
 from PIL import Image, ImageFile, UnidentifiedImageError
 
@@ -16,6 +17,57 @@ from tasks.scheduled.convert_images_to_webp import ImageConverter
 from utils.context import ctx_httpx_client
 
 from .base_handler import CoverSize, FSHandler
+
+LOCAL_FILE_SCHEMES = ("file://", "launchbox-file://")
+
+
+def _resolve_local_file_uri(uri: str) -> Path | None:
+    """Resolve a local-file URI to an absolute Path, or None if unsafe/unknown.
+
+    `file://` resolves under the ROM library root. `launchbox-file://` resolves
+    under the LaunchBox data root, since LaunchBox metadata produces paths
+    relative to `/romm/launchbox`, which is not the same as the library root.
+    """
+    from handler.filesystem import fs_rom_handler, get_fs_launchbox_handler
+
+    if uri.startswith("launchbox-file://"):
+        try:
+            return get_fs_launchbox_handler().validate_path(
+                uri[len("launchbox-file://") :]
+            )
+        except ValueError:
+            return None
+
+    if uri.startswith("file://"):
+        try:
+            return fs_rom_handler.validate_path(uri[len("file://") :])
+        except ValueError:
+            return None
+
+    return None
+
+
+def _content_type_essence(header_value: str) -> str:
+    """Return the MIME type token (before parameters), lowercased."""
+    if not header_value:
+        return ""
+
+    return (
+        header_value.split(";", 1)[0].strip().lower().lstrip("\ufeff")
+    )  # Remove BOM if present
+
+
+def _check_content_type(
+    response: httpx.Response, allowed_prefixes: tuple[str, ...], label: str
+) -> bool:
+    raw = response.headers.get("content-type", "")
+    essence = _content_type_essence(raw)
+    if not essence or not any(essence.startswith(p) for p in allowed_prefixes):
+        log.warning(
+            f"Unexpected content type for {label}: {raw or '(missing header)'}",
+        )
+        return False
+    return True
 
 
 class FSResourcesHandler(FSHandler):
@@ -70,23 +122,23 @@ class FSResourcesHandler(FSHandler):
         cover_file = f"{entity.fs_resources_path}/cover"
         await self.make_directory(cover_file)
 
-        # Handle file:// URLs for gamelist.xml
-        if url_cover.startswith("file://"):
+        # Handle local-file URIs from metadata handlers (gamelist, LaunchBox)
+        if url_cover.startswith(LOCAL_FILE_SCHEMES):
             try:
-                file_path = Path(url_cover[7:])  # Remove "file://" prefix
-                if file_path.exists():
-                    # Copy the file to the resources directory
-                    dest_path = f"{cover_file}/{size.value}.png"
-                    await self.copy_file(file_path, dest_path)
-
-                    if ENABLE_SCHEDULED_CONVERT_IMAGES_TO_WEBP:
-                        self.image_converter.convert_to_webp(
-                            self.validate_path(f"{cover_file}/{size.value}.png"),
-                            force=True,
-                        )
-                else:
-                    log.warning(f"Cover file not found: {file_path}")
+                resolved = _resolve_local_file_uri(url_cover)
+                if resolved is None or not await AnyioPath(resolved).exists():
+                    log.warning(f"Cover file not found: {url_cover}")
                     return None
+                dest_path = f"{cover_file}/{size.value}.png"
+                # Small-size covers get resized in place, which would mutate
+                # the user's source image if the destination were a hardlink.
+                await self.copy_file(resolved, dest_path, allow_link=False)
+
+                if ENABLE_SCHEDULED_CONVERT_IMAGES_TO_WEBP:
+                    self.image_converter.convert_to_webp(
+                        self.validate_path(f"{cover_file}/{size.value}.png"),
+                        force=True,
+                    )
             except Exception as exc:
                 log.error(f"Unable to copy cover file {url_cover}: {str(exc)}")
                 return None
@@ -98,6 +150,9 @@ class FSResourcesHandler(FSHandler):
                     "GET", url_cover, timeout=120
                 ) as response:
                     if response.status_code == status.HTTP_200_OK:
+                        if not _check_content_type(response, ("image/",), "cover"):
+                            return None
+
                         # Check if content is gzipped from response headers
                         is_gzipped = (
                             response.headers.get("content-encoding", "").lower()
@@ -241,16 +296,16 @@ class FSResourcesHandler(FSHandler):
         screenshot_path = f"{rom.fs_resources_path}/screenshots"
         await self.make_directory(screenshot_path)
 
-        # Handle file:// URLs for gamelist.xml
-        if url_screenhot.startswith("file://"):
+        # Handle local-file URIs from metadata handlers (gamelist, LaunchBox)
+        if url_screenhot.startswith(LOCAL_FILE_SCHEMES):
             try:
-                file_path = Path(url_screenhot[7:])  # Remove "file://" prefix
-                if file_path.exists():
-                    # Copy the file to the resources directory
-                    await self.copy_file(file_path, f"{screenshot_path}/{idx}.jpg")
-                else:
-                    log.warning(f"Screenshot file not found: {file_path}")
+                resolved = _resolve_local_file_uri(url_screenhot)
+                if resolved is None or not await AnyioPath(resolved).exists():
+                    log.warning(f"Screenshot file not found: {url_screenhot}")
                     return None
+                await self.copy_file(
+                    resolved, f"{screenshot_path}/{idx}.jpg", allow_link=True
+                )
             except Exception as exc:
                 log.error(f"Unable to copy screenshot file {url_screenhot}: {str(exc)}")
                 return None
@@ -262,6 +317,9 @@ class FSResourcesHandler(FSHandler):
                     "GET", url_screenhot, timeout=120
                 ) as response:
                     if response.status_code == status.HTTP_200_OK:
+                        if not _check_content_type(response, ("image/",), "screenshot"):
+                            return None
+
                         # Check if content is gzipped from response headers
                         is_gzipped = (
                             response.headers.get("content-encoding", "").lower()
@@ -352,16 +410,16 @@ class FSResourcesHandler(FSHandler):
         manual_path = f"{rom.fs_resources_path}/manual"
         await self.make_directory(manual_path)
 
-        # Handle file:// URLs for gamelist.xml
-        if url_manual.startswith("file://"):
+        # Handle local-file URIs from metadata handlers (gamelist, LaunchBox)
+        if url_manual.startswith(LOCAL_FILE_SCHEMES):
             try:
-                file_path = Path(url_manual[7:])  # Remove "file://" prefix
-                if file_path.exists():
-                    # Copy the file to the resources directory
-                    await self.copy_file(file_path, f"{manual_path}/{rom.id}.pdf")
-                else:
-                    log.warning(f"Manual file not found: {file_path}")
+                resolved = _resolve_local_file_uri(url_manual)
+                if resolved is None or not await AnyioPath(resolved).exists():
+                    log.warning(f"Manual file not found: {url_manual}")
                     return None
+                await self.copy_file(
+                    resolved, f"{manual_path}/{rom.id}.pdf", allow_link=True
+                )
             except Exception as exc:
                 log.error(f"Unable to copy manual file {url_manual}: {str(exc)}")
                 return None
@@ -373,6 +431,17 @@ class FSResourcesHandler(FSHandler):
                     "GET", url_manual, timeout=120
                 ) as response:
                     if response.status_code == status.HTTP_200_OK:
+                        if not _check_content_type(
+                            response,
+                            (
+                                "application/pdf",
+                                "application/force-download",
+                                "application/octet-stream",
+                            ),
+                            "manual",
+                        ):
+                            return None
+
                         # Check if content is gzipped from response headers
                         is_gzipped = (
                             response.headers.get("content-encoding", "").lower()
@@ -438,6 +507,9 @@ class FSResourcesHandler(FSHandler):
         try:
             async with httpx_client.stream("GET", url, timeout=120) as response:
                 if response.status_code == status.HTTP_200_OK:
+                    if not _check_content_type(response, ("image/",), "badge"):
+                        return
+
                     async with await self.write_file_streamed(
                         path=directory, filename=filename
                     ) as f:
@@ -466,7 +538,7 @@ class FSResourcesHandler(FSHandler):
     ) -> str:
         return os.path.join("roms", str(platform_id), str(rom_id), media_type.value)
 
-    async def store_media_file(self, url: str, dest_path: str) -> None:
+    async def store_media_file(self, url_media: str, dest_path: str) -> None:
         httpx_client = ctx_httpx_client.get()
         directory, filename = os.path.split(dest_path)
 
@@ -477,28 +549,37 @@ class FSResourcesHandler(FSHandler):
         # Ensure destination directory exists
         await self.make_directory(directory)
 
-        # Handle file:// URLs for gamelist.xml
-        if url.startswith("file://"):
+        # Handle local-file URIs from metadata handlers (gamelist, LaunchBox)
+        if url_media.startswith(LOCAL_FILE_SCHEMES):
             try:
-                file_path = Path(url[7:])  # Remove "file://" prefix
-                if file_path.exists():
-                    await self.copy_file(file_path, dest_path)
+                resolved = _resolve_local_file_uri(url_media)
+                if resolved is not None and await AnyioPath(resolved).exists():
+                    await self.copy_file(resolved, dest_path, allow_link=True)
             except Exception as exc:
-                log.error(f"Unable to copy media file {url}: {str(exc)}")
+                log.error(f"Unable to copy media file {url_media}: {str(exc)}")
                 return None
         else:
             # Handle HTTP URLs
             httpx_client = ctx_httpx_client.get()
             try:
-                async with httpx_client.stream("GET", url, timeout=120) as response:
+                async with httpx_client.stream(
+                    "GET", url_media, timeout=120
+                ) as response:
                     if response.status_code == status.HTTP_200_OK:
+                        if not _check_content_type(
+                            response,
+                            ("image/", "video/", "application/pdf"),
+                            "media",
+                        ):
+                            return None
+
                         async with await self.write_file_streamed(
                             path=directory, filename=filename
                         ) as f:
                             async for chunk in response.aiter_raw():
                                 await f.write(chunk)
             except httpx.TransportError as exc:
-                log.error(f"Unable to fetch media file at {url}: {str(exc)}")
+                log.error(f"Unable to fetch media file at {url_media}: {str(exc)}")
                 return None
 
     async def remove_media_resources_path(

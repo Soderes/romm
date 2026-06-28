@@ -16,6 +16,7 @@ import storeAuth from "@/stores/auth";
 import storeCollections from "@/stores/collections";
 import storeDownload from "@/stores/download";
 import storeGalleryFilter from "@/stores/galleryFilter";
+import storePlatforms from "@/stores/platforms";
 import storeRoms, { type SimpleRom } from "@/stores/roms";
 import type { Events } from "@/types/emitter";
 import {
@@ -44,6 +45,7 @@ const { filteredRoms, selectedRoms, fetchingRoms, fetchTotalRoms } =
 const auth = storeAuth();
 const galleryFilterStore = storeGalleryFilter();
 const collectionsStore = storeCollections();
+const platformsStore = storePlatforms();
 const emitter = inject<Emitter<Events>>("emitter");
 
 const HEADERS = [
@@ -99,12 +101,6 @@ const HEADERS = [
 
 const selectedRomIDs = computed(() => selectedRoms.value.map((rom) => rom.id));
 
-function hasNotes(item: SimpleRom): boolean {
-  // TODO: Add note count to SimpleRom or check all_user_notes
-  // For now, return false until we implement proper note counting
-  return false;
-}
-
 function showNoteDialog(event: MouseEvent | KeyboardEvent, item: SimpleRom) {
   event.preventDefault();
   emitter?.emit("showNoteDialog", item);
@@ -134,13 +130,18 @@ function updateSelectedRom(rom: SimpleRom) {
 type SortBy = { key: keyof SimpleRom; order: "asc" | "desc" }[];
 
 function updateOptions({ sortBy }: { sortBy: SortBy }) {
-  if (!sortBy[0]) return;
-  const { key, order } = sortBy[0];
-
   romsStore.resetPagination();
-  romsStore.setOrderBy(key);
-  romsStore.setOrderDir(order);
-  romsStore.fetchRoms({ galleryFilter: galleryFilterStore });
+  if (sortBy[0]) {
+    const { key, order } = sortBy[0];
+    romsStore.setOrderBy(key);
+    romsStore.setOrderDir(order);
+  } else {
+    // Clear the `orderBy` key when the user removes
+    // the sort column from the table
+    romsStore.setOrderBy("");
+    romsStore.setOrderDir("asc");
+  }
+  romsStore.fetchRoms();
 }
 </script>
 
@@ -304,16 +305,26 @@ function updateOptions({ sortBy }: { sortBy: SortBy }) {
                 </v-avatar>
               </v-chip>
               <v-chip
-                v-if="item.siblings.length > 0 && showSiblings"
-                class="translucent text-white mr-1 px-1 item-chip"
+                v-if="item.libretro_id"
+                class="mr-1 pa-0 item-chip"
                 size="x-small"
-                :title="`${item.siblings.length} sibling(s)`"
+                title="Libretro match"
+              >
+                <v-avatar variant="text" size="20" rounded>
+                  <v-img src="/assets/scrappers/libretro.png" />
+                </v-avatar>
+              </v-chip>
+              <v-chip
+                v-if="item.sibling_roms.length > 0 && showSiblings"
+                class="translucent mr-1 px-1 item-chip"
+                size="x-small"
+                :title="`${item.sibling_roms.length} sibling(s)`"
               >
                 <v-icon>mdi-card-multiple-outline</v-icon>
               </v-chip>
               <v-chip
-                v-if="hasNotes(item)"
-                class="translucent text-white mr-1 px-1"
+                v-if="item.has_notes"
+                class="translucent mr-1 px-1"
                 chip
                 size="x-small"
                 title="View notes"
@@ -326,7 +337,7 @@ function updateOptions({ sortBy }: { sortBy: SortBy }) {
                 :text="`Missing from filesystem: ${item.fs_path}/${item.fs_name}`"
                 class="mr-1 px-1 item-chip"
                 chip
-                chip-size="x-small"
+                chip-size="small"
               />
             </template>
           </v-list-item>

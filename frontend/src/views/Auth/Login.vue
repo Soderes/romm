@@ -1,8 +1,8 @@
 <script setup lang="ts">
 import type { Emitter } from "mitt";
-import { inject, ref } from "vue";
+import { inject, onMounted, ref } from "vue";
 import { useI18n } from "vue-i18n";
-import { useRouter } from "vue-router";
+import { useRoute, useRouter } from "vue-router";
 import { refetchCSRFToken } from "@/services/api";
 import identityApi from "@/services/api/identity";
 import storeAuth from "@/stores/auth";
@@ -14,13 +14,18 @@ const heartbeatStore = storeHeartbeat();
 const authStore = storeAuth();
 const emitter = inject<Emitter<Events>>("emitter");
 const router = useRouter();
+const route = useRoute();
 const username = ref("");
 const password = ref("");
 const visiblePassword = ref(false);
 const loggingIn = ref(false);
 const loggingInOIDC = ref(false);
 const {
-  OIDC: { ENABLED: oidcEnabled, PROVIDER: oidcProvider },
+  OIDC: {
+    ENABLED: oidcEnabled,
+    AUTOLOGIN: oidcAutologin,
+    PROVIDER: oidcProvider,
+  },
   FRONTEND: { DISABLE_USERPASS_LOGIN: loginDisabled },
 } = heartbeatStore.value;
 const forgotMode = ref(false);
@@ -91,17 +96,20 @@ async function loginOIDC() {
   loggingInOIDC.value = true;
   window.open("/api/login/openid", "_self");
 }
+
+onMounted(async () => {
+  const bypassAutologin = route.query.bypass_autologin === "true";
+  if (oidcEnabled && oidcAutologin && !bypassAutologin) {
+    loginOIDC();
+  }
+});
 </script>
 
 <template>
   <v-card class="translucent py-8 px-5" width="500">
     <v-img src="/assets/isotipo.svg" class="mx-auto mb-8" width="80" />
     <v-expand-transition>
-      <v-row
-        v-if="!forgotMode"
-        class="text-white justify-center mt-2"
-        no-gutters
-      >
+      <v-row v-if="!forgotMode" class="justify-center mt-2" no-gutters>
         <v-col cols="10">
           <v-form
             v-if="!loginDisabled"
@@ -210,7 +218,7 @@ async function loginOIDC() {
     <v-expand-transition>
       <v-row
         v-if="forgotMode && !loginDisabled"
-        class="text-white justify-center mt-2"
+        class="justify-center mt-2"
         no-gutters
       >
         <v-col cols="10">

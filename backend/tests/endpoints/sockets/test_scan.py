@@ -1,9 +1,12 @@
-from unittest.mock import Mock
+from unittest.mock import AsyncMock, MagicMock, Mock
 
 import pytest
 import socketio
 
-from endpoints.sockets.scan import ScanStats, _should_scan_rom
+from endpoints.sockets import scan as scan_module
+from endpoints.sockets.scan import ScanStats, _should_scan_rom, scan_platforms
+from handler.filesystem.roms_handler import FSRomsHandler
+from handler.metadata.base_handler import UniversalPlatformSlug as UPS
 from handler.scan_handler import ScanType
 from models.rom import Rom
 
@@ -72,6 +75,83 @@ async def test_merging_scan_stats():
     assert stats.new_firmware == 25
 
 
+class TestScanTotals:
+    """The scan tracker totals must reflect the platforms/roms actually scanned."""
+
+    @pytest.fixture
+    def patched(self, mocker):
+        """Patch the collaborators of scan_platforms so totals can be inspected."""
+        socket_manager = AsyncMock()
+        mocker.patch.object(
+            scan_module, "_get_socket_manager", return_value=socket_manager
+        )
+        mocker.patch.object(
+            scan_module.fs_platform_handler,
+            "get_platforms",
+            AsyncMock(return_value=["existing", "new1", "new2"]),
+        )
+        # Each platform reports 100 roms on disk.
+        mocker.patch.object(
+            scan_module.fs_rom_handler, "count_roms", AsyncMock(return_value=100)
+        )
+        mocker.patch.object(scan_module.meta_gamelist_handler, "clear_cache")
+        mocker.patch.object(
+            scan_module.db_platform_handler, "mark_missing_platforms", return_value=[]
+        )
+        # The "existing" platform is already in the database; "new1"/"new2" are not.
+        existing_platform = MagicMock(id=1, fs_slug="existing")
+        mocker.patch.object(
+            scan_module.db_platform_handler,
+            "get_platforms",
+            return_value=[existing_platform],
+        )
+        mocker.patch.object(
+            scan_module.db_rom_handler, "invalidate_filter_values_cache"
+        )
+        config = MagicMock()
+        config.GAMELIST_AUTO_EXPORT_ON_SCAN = False
+        config.PEGASUS_AUTO_EXPORT_ON_SCAN = False
+        mocker.patch.object(scan_module.cm, "get_config", return_value=config)
+
+        # Skip the actual per-platform scanning, returning the stats unchanged.
+        async def fake_identify(**kwargs):
+            return kwargs["scan_stats"]
+
+        mocker.patch.object(
+            scan_module, "_identify_platform", side_effect=fake_identify
+        )
+        return socket_manager
+
+    async def test_new_platforms_total_excludes_existing(self, patched, mocker):
+        """NEW_PLATFORMS totals must skip platforms already in the database."""
+        result = await scan_platforms(
+            platform_ids=[],
+            metadata_sources=[],
+            scan_type=ScanType.NEW_PLATFORMS,
+        )
+
+        # Only the two new platforms (and their roms) should be counted.
+        assert result.total_platforms == 2
+        assert result.total_roms == 200
+
+    async def test_complete_scan_counts_all_selected(self, patched, mocker):
+        """COMPLETE totals include every filesystem platform being scanned."""
+        mocker.patch.object(
+            scan_module.db_platform_handler,
+            "get_platform_by_fs_slug",
+            return_value=MagicMock(),
+        )
+
+        result = await scan_platforms(
+            platform_ids=[],
+            metadata_sources=[],
+            scan_type=ScanType.COMPLETE,
+        )
+
+        assert result.total_platforms == 3
+        assert result.total_roms == 300
+
+
 class TestShouldScanRom:
     def test_new_platforms_scan_with_no_rom(self):
         """NEW_PLATFORMS should scan when rom is None"""
@@ -96,17 +176,27 @@ class TestShouldScanRom:
 
     # Test COMPLETE scan type
     def test_complete_scan_always_scans(self, rom: Rom):
-        """COMPLETE should always scan regardless of rom state"""
+        """COMPLETE should scan everything when unscoped, but respect roms_ids when scoped"""
         assert _should_scan_rom(ScanType.COMPLETE, None, [], ["igdb"]) is True
         assert _should_scan_rom(ScanType.COMPLETE, rom, [], ["igdb"]) is True
-        assert _should_scan_rom(ScanType.COMPLETE, rom, [2, 3], ["igdb"]) is True
+        # Scoped scan should not scan/add new filesystem ROMs when rom is None
+        assert _should_scan_rom(ScanType.COMPLETE, None, [rom.id], ["igdb"]) is False
+        # Scoped scan: rom not in list → skip even for COMPLETE
+        assert (
+            _should_scan_rom(ScanType.COMPLETE, rom, [rom.id + 99], ["igdb"]) is False
+        )
+        assert _should_scan_rom(ScanType.COMPLETE, rom, [rom.id], ["igdb"]) is True
 
     # Test HASHES scan type
     def test_hashes_scan_always_scans(self, rom: Rom):
-        """HASHES should always scan regardless of rom state"""
+        """HASHES should scan everything when unscoped, but respect roms_ids when scoped"""
         assert _should_scan_rom(ScanType.HASHES, None, [], ["igdb"]) is True
         assert _should_scan_rom(ScanType.HASHES, rom, [], ["igdb"]) is True
-        assert _should_scan_rom(ScanType.HASHES, rom, [2, 3], ["igdb"]) is True
+        # Scoped scan should not scan/add new filesystem ROMs when rom is None
+        assert _should_scan_rom(ScanType.HASHES, None, [rom.id], ["igdb"]) is False
+        # Scoped scan: rom not in list → skip even for HASHES
+        assert _should_scan_rom(ScanType.HASHES, rom, [rom.id + 99], ["igdb"]) is False
+        assert _should_scan_rom(ScanType.HASHES, rom, [rom.id], ["igdb"]) is True
 
     # Test UNMATCHED scan type
     def test_unmatched_scan_with_no_rom(self):
@@ -168,17 +258,24 @@ class TestShouldScanRom:
             assert result is True
 
     def test_no_scan_when_rom_id_not_in_list(self, rom: Rom):
-        """Should follow normal rules when rom.id is not in roms_ids list"""
+        """When roms_ids is non-empty, scan is scoped: roms outside the list are skipped for every scan type"""
         rom.id = 4
+        rom.igdb_id = None
+        rom.moby_id = None
+        rom.ss_id = None
+        rom.ra_id = None
+        rom.launchbox_id = None
         roms_ids = [1, 2, 3]
 
-        # These should not scan because rom exists and id not in list
-        assert (
-            _should_scan_rom(ScanType.NEW_PLATFORMS, rom, roms_ids, ["igdb"]) is False
-        )
-        assert _should_scan_rom(ScanType.QUICK, rom, roms_ids, ["igdb"]) is False
-        assert _should_scan_rom(ScanType.UPDATE, rom, roms_ids, ["igdb"]) is False
-        assert _should_scan_rom(ScanType.UNMATCHED, rom, roms_ids, ["igdb"]) is True
+        for scan_type in [
+            ScanType.NEW_PLATFORMS,
+            ScanType.QUICK,
+            ScanType.UPDATE,
+            ScanType.UNMATCHED,
+            ScanType.COMPLETE,
+            ScanType.HASHES,
+        ]:
+            assert _should_scan_rom(scan_type, rom, roms_ids, ["igdb"]) is False
 
     # Edge cases
     def test_empty_roms_ids_list(self, rom: Rom):
@@ -244,3 +341,66 @@ class TestShouldScanRom:
 
         result = _should_scan_rom(scan_type, rom, roms_ids, ["igdb"])
         assert result is expected
+
+
+class TestGetPico8CoverUrl:
+    """Tests for the PICO-8 cover art URL helper on FSRomsHandler."""
+
+    @pytest.fixture
+    def handler(self):
+        return FSRomsHandler()
+
+    def test_returns_file_url_for_pico8_cartridge(self, handler: FSRomsHandler):
+        url = handler.get_pico8_cover_url(
+            platform_slug=UPS.PICO,
+            fs_name="mygame.p8.png",
+            fs_path="pico/roms",
+        )
+        expected = "file://pico/roms/mygame.p8.png"
+        assert url == expected
+
+    def test_returns_none_for_non_pico8_platform(self, handler: FSRomsHandler):
+        url = handler.get_pico8_cover_url(
+            platform_slug="snes",
+            fs_name="mygame.p8.png",
+            fs_path="snes/roms",
+        )
+        assert url is None
+
+    def test_returns_none_for_plain_p8_text_file(self, handler: FSRomsHandler):
+        """Plain .p8 files are text-only and have no embedded PNG image."""
+        url = handler.get_pico8_cover_url(
+            platform_slug=UPS.PICO,
+            fs_name="mygame.p8",
+            fs_path="pico/roms",
+        )
+        assert url is None
+
+    def test_returns_none_for_unrelated_extension(self, handler: FSRomsHandler):
+        url = handler.get_pico8_cover_url(
+            platform_slug=UPS.PICO,
+            fs_name="mygame.zip",
+            fs_path="pico/roms",
+        )
+        assert url is None
+
+    def test_url_starts_with_file_scheme(self, handler: FSRomsHandler):
+        url = handler.get_pico8_cover_url(
+            platform_slug=UPS.PICO,
+            fs_name="cart.p8.png",
+            fs_path="pico/roms",
+        )
+        assert url is not None
+        assert url.startswith("file://")
+
+    def test_url_contains_fs_path_and_name(self, handler: FSRomsHandler):
+        fs_path = "pico/roms"
+        fs_name = "celeste.p8.png"
+        url = handler.get_pico8_cover_url(
+            platform_slug=UPS.PICO,
+            fs_name=fs_name,
+            fs_path=fs_path,
+        )
+        assert url is not None
+        assert fs_path in url
+        assert fs_name in url

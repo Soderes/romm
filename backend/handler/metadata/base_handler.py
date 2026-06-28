@@ -5,7 +5,7 @@ import re
 import unicodedata
 from functools import lru_cache
 from pathlib import Path
-from typing import Final, NotRequired, TypedDict
+from typing import Final, Mapping, NotRequired, TypedDict
 from urllib.parse import parse_qsl, urlencode, urlparse, urlunparse
 
 from strsimpy.jaro_winkler import JaroWinkler
@@ -30,6 +30,9 @@ SWITCH_PRODUCT_ID_REGEX: Final = re.compile(r"(0100[0-9A-F]{12})")
 # No regex needed for MAME
 MAME_XML_KEY: Final = "romm:mame_xml"
 
+# ScummVM
+SCUMMVM_INDEX_KEY: Final = "romm:scummvm_index"
+
 # PS2 OPL
 PS2_OPL_REGEX: Final = re.compile(r"^([A-Z]{4}_\d{3}\.\d{2})\..*$")
 PS2_OPL_KEY: Final = "romm:ps2_opl_index"
@@ -49,6 +52,7 @@ MULTIPLE_SPACE_PATTERN = re.compile(r"\s+")
 
 class BaseRom(TypedDict):
     name: NotRequired[str]
+    name_sort_key: NotRequired[str | None]
     summary: NotRequired[str]
     url_cover: NotRequired[str]
     url_screenshots: NotRequired[list[str]]
@@ -68,6 +72,10 @@ SENSITIVE_KEYS = {
     "devpassword",
     "y",
 }
+SENSITIVE_KEYS_REGEX = re.compile(
+    rf"({'|'.join(re.escape(k) for k in SENSITIVE_KEYS)})=[^&\s\"]*",
+    re.IGNORECASE,
+)
 
 
 # This caches results to avoid repeated normalization of the same search term
@@ -99,6 +107,7 @@ def _normalize_search_term(
 def strip_sensitive_query_params(
     url: str, sensitive_keys: set[str] = SENSITIVE_KEYS
 ) -> str:
+    """Remove sensitive query parameters from a URL."""
     parsed = urlparse(url)
     qsl = parse_qsl(parsed.query, keep_blank_values=True)
 
@@ -106,6 +115,18 @@ def strip_sensitive_query_params(
     keep = [(k, v) for k, v in qsl if k.lower() not in keys_lower]
 
     new_query = urlencode(keep, doseq=True)
+    return urlunparse(parsed._replace(query=new_query))
+
+
+def restore_sensitive_query_params(url: str, params: dict[str, str]) -> str:
+    """Add back key/value pairs previously stripped by strip_sensitive_query_params."""
+    parsed = urlparse(url)
+    qsl = parse_qsl(parsed.query, keep_blank_values=True)
+
+    existing = {k.lower() for k in params}
+    filtered = [(k, v) for k, v in qsl if k.lower() not in existing]
+
+    new_query = urlencode(filtered + list(params.items()))
     return urlunparse(parsed._replace(query=new_query))
 
 
@@ -261,7 +282,20 @@ class MetadataHandler(abc.ABC):
 
         return search_term
 
-    def _mask_sensitive_values(self, values: dict[str, str | None]) -> dict[str, str]:
+    async def _scummvm_format(self, search_term: str) -> str:
+        from handler.filesystem import fs_rom_handler
+
+        search_term = fs_rom_handler.get_file_name_with_no_extension(search_term)
+        index_entry = await async_cache.hget(SCUMMVM_INDEX_KEY, search_term)
+        if index_entry:
+            index_entry = json.loads(index_entry)
+            search_term = index_entry["name"]
+
+        return search_term
+
+    def _mask_sensitive_values(
+        self, values: Mapping[str, str | None]
+    ) -> dict[str, str]:
         """
         Mask sensitive values (headers or params), leaving only the first 2 and last 2 characters of the token.
         """
@@ -377,6 +411,9 @@ class UniversalPlatformSlug(enum.StrEnum):
     COMPUCOLOR_II = "compucolor-ii"
     COMPUCORP_PROGRAMMABLE_CALCULATOR = "compucorp-programmable-calculator"
     CPET = "cpet"
+    CPS1 = "cps1"
+    CPS2 = "cps2"
+    CPS3 = "cps3"
     CPM = "cpm"
     CREATIVISION = "creativision"
     CYBERVISION = "cybervision"
@@ -638,6 +675,7 @@ class UniversalPlatformSlug(enum.StrEnum):
     SPECTRAVIDEO = "spectravideo"
     SRI_5001000 = "sri-5001000"
     STADIA = "stadia"
+    STEAM = "steam"
     STEAM_VR = "steam-vr"
     STV = "stv"
     SUFAMI_TURBO = "sufami-turbo"
@@ -672,6 +710,7 @@ class UniversalPlatformSlug(enum.StrEnum):
     TI_99 = "ti-99"
     TI_994A = "ti-994a"
     TI_PROGRAMMABLE_CALCULATOR = "ti-programmable-calculator"
+    TIC_80 = "tic-80"
     TIKI_100 = "tiki-100"
     TIM = "tim"
     TIMEX_SINCLAIR_2068 = "timex-sinclair-2068"

@@ -11,7 +11,9 @@ import type {
   NetplayICEServer,
 } from "@/__generated__";
 import { ROUTES } from "@/plugins/router";
+import playSessionApi from "@/services/api/play-session";
 import { saveApi as api } from "@/services/api/save";
+import storeAuth from "@/stores/auth";
 import storeConfig from "@/stores/config";
 import storeLanguage from "@/stores/language";
 import storePlaying from "@/stores/playing";
@@ -28,6 +30,7 @@ import {
   saveState,
   loadEmulatorJSSave,
   loadEmulatorJSState,
+  invalidateEmulatorJSRomCacheIfRenamed,
   createQuickLoadButton,
   createSaveQuitButton,
   createExitEmulationButton,
@@ -35,6 +38,7 @@ import {
 
 const INVALID_CHARS_REGEX = /[#<$+%>!`&*'|{}/\\?"=@:^\r\n]/gi;
 
+const authStore = storeAuth();
 const romsStore = storeRoms();
 const playingStore = storePlaying();
 const configStore = storeConfig();
@@ -51,6 +55,8 @@ const props = defineProps<{
 }>();
 const romRef = ref<DetailedRom>(props.rom);
 const saveRef = ref<SaveSchema | null>(props.save);
+const sessionStartTime = ref<Date | null>(null);
+const deviceIDRef = ref(authStore.user?.current_device_id ?? undefined);
 const theme = useTheme();
 const emitter = inject<Emitter<Events>>("emitter");
 const { playing, fullScreen } = storeToRefs(playingStore);
@@ -119,7 +125,10 @@ declare global {
   }
 }
 
-const supportedCores = getSupportedEJSCores(romRef.value.platform_slug);
+const supportedCores = getSupportedEJSCores(
+  romRef.value.platform_slug,
+  configStore.config.EJS_NETPLAY_ENABLED,
+);
 window.EJS_core =
   supportedCores.find((core) => core === props.core) ?? supportedCores[0];
 window.EJS_controlScheme = getControlSchemeForPlatform(
@@ -127,6 +136,7 @@ window.EJS_controlScheme = getControlSchemeForPlatform(
 );
 window.EJS_threads = areThreadsRequiredForEJSCore(window.EJS_core);
 window.EJS_gameID = romRef.value.id;
+invalidateEmulatorJSRomCacheIfRenamed(romRef.value);
 window.EJS_gameUrl = getDownloadPath({
   rom: romRef.value,
   fileIDs: props.disc ? [props.disc] : [],
@@ -275,6 +285,7 @@ window.EJS_onSaveSave = async function ({
     save: saveRef.value,
     saveFile,
     screenshotFile,
+    deviceId: deviceIDRef.value,
   });
 
   romsStore.update(romRef.value);
@@ -348,6 +359,7 @@ window.EJS_onSaveState = async function ({
 };
 
 window.EJS_onGameStart = async () => {
+  sessionStartTime.value = new Date();
   setTimeout(async () => {
     if (props.save) await loadSave(props.save);
     if (props.state) await loadState(props.state);
@@ -404,6 +416,7 @@ window.EJS_onGameStart = async () => {
       save: saveRef.value,
       saveFile,
       screenshotFile,
+      deviceId: deviceIDRef.value,
     });
 
     romsStore.update(romRef.value);
@@ -434,10 +447,37 @@ window.EJS_onGameStart = async () => {
 };
 
 function immediateExit() {
-  router
-    .push({ name: ROUTES.ROM, params: { rom: romRef.value.id } })
-    .catch((error) => {
-      console.error("Error navigating to console rom", error);
+  if (!sessionStartTime.value) {
+    return router
+      .push({ name: ROUTES.ROM, params: { rom: romRef.value.id } })
+      .catch((error) => {
+        console.error("Error navigating to console rom", error);
+      });
+  }
+
+  const endTime = new Date();
+  const durationMs = endTime.getTime() - sessionStartTime.value.getTime();
+
+  playSessionApi
+    .ingestPlaySessions({
+      deviceId: deviceIDRef.value,
+      sessions: [
+        {
+          rom_id: romRef.value.id,
+          start_time: sessionStartTime.value.toISOString(),
+          end_time: endTime.toISOString(),
+          duration_ms: durationMs,
+        },
+      ],
+    })
+    .catch((err) => console.error("Failed to submit play session:", err))
+    .finally(() => {
+      sessionStartTime.value = null;
+      router
+        .push({ name: ROUTES.ROM, params: { rom: romRef.value.id } })
+        .catch((error) => {
+          console.error("Error navigating to console rom", error);
+        });
     });
 }
 

@@ -10,8 +10,6 @@ import sqlalchemy as sa
 from alembic import op
 from sqlalchemy import text
 
-from utils.database import is_mariadb, is_mysql
-
 # revision identifiers, used by Alembic.
 revision = "0057_multi_notes"
 down_revision = "0056_gamelist_xml"
@@ -50,23 +48,17 @@ def upgrade() -> None:
         sa.UniqueConstraint(
             "rom_id", "user_id", "title", name="unique_rom_user_note_title"
         ),
+        if_not_exists=True,
     )
 
     # Create indexes for performance
-    op.create_index("idx_rom_notes_public", "rom_notes", ["is_public"])
-    op.create_index("idx_rom_notes_rom_user", "rom_notes", ["rom_id", "user_id"])
-    op.create_index("idx_rom_notes_title", "rom_notes", ["title"])
-
-    # Get connection for manual index creation
-    connection = op.get_bind()
-
-    # For MariaDB compatibility, we limit the content index length
-    if is_mysql(connection) or is_mariadb(connection):
-        connection.execute(
-            text("CREATE INDEX idx_rom_notes_content ON rom_notes (content(100))")
-        )
-    else:
-        op.create_index("idx_rom_notes_content", "rom_notes", ["content"])
+    op.create_index(
+        "idx_rom_notes_public", "rom_notes", ["is_public"], if_not_exists=True
+    )
+    op.create_index(
+        "idx_rom_notes_rom_user", "rom_notes", ["rom_id", "user_id"], if_not_exists=True
+    )
+    op.create_index("idx_rom_notes_title", "rom_notes", ["title"], if_not_exists=True)
 
     # Add default values to old note columns to prevent insertion errors
     # This allows new rom_user records to be created without specifying note fields
@@ -87,24 +79,18 @@ def upgrade() -> None:
 
     # Migrate existing notes from rom_user to rom_notes table
     # Both note_raw_markdown and note_is_public columns exist from previous migrations
-
-    result = connection.execute(
-        text(
-            """
+    connection = op.get_bind()
+    result = connection.execute(text("""
             SELECT id, rom_id, user_id, note_raw_markdown, note_is_public, updated_at
             FROM rom_user
-        """
-        )
-    )
+        """))
 
     for row in result:
         connection.execute(
-            text(
-                """
+            text("""
                 INSERT INTO rom_notes (title, content, is_public, tags, created_at, updated_at, rom_id, user_id)
                 VALUES (:title, :content, :is_public, :tags, :created_at, :updated_at, :rom_id, :user_id)
-            """
-            ),
+            """),
             {
                 "title": "My Note",
                 "content": row.note_raw_markdown or "",  # Handle potential NULL content
@@ -116,50 +102,46 @@ def upgrade() -> None:
                 "user_id": row.user_id,
             },
         )
-        # Remove the old note columns from rom_user table in a future migration
-        # op.drop_column("rom_user", "note_raw_markdown")
-        # op.drop_column("rom_user", "note_is_public")
+        # TODO: Remove the old note columns from rom_user table in a future migration
 
 
 def downgrade() -> None:
     """Drop the rom_notes table and restore note columns to rom_user."""
 
-    connection = op.get_bind()
-
     # Add back the old columns to rom_user
-    op.add_column(
-        "rom_user",
-        sa.Column("note_raw_markdown", sa.Text(), nullable=False, server_default=""),
-    )
-    op.add_column(
-        "rom_user",
-        sa.Column(
-            "note_is_public", sa.Boolean(), nullable=False, server_default=text("false")
-        ),
-    )
+    with op.batch_alter_table("rom_user", schema=None) as batch_op:
+        batch_op.add_column(
+            sa.Column(
+                "note_raw_markdown", sa.Text(), nullable=False, server_default=""
+            ),
+            if_not_exists=True,
+        )
+        batch_op.add_column(
+            sa.Column(
+                "note_is_public",
+                sa.Boolean(),
+                nullable=False,
+                server_default=text("false"),
+            ),
+            if_not_exists=True,
+        )
 
     # Migrate notes back to rom_user (take first note per user/rom)
-
-    result = connection.execute(
-        text(
-            """
+    connection = op.get_bind()
+    result = connection.execute(text("""
             SELECT DISTINCT rom_id, user_id, 
                    FIRST_VALUE(content) OVER (PARTITION BY rom_id, user_id ORDER BY updated_at DESC) as content,
                    FIRST_VALUE(is_public) OVER (PARTITION BY rom_id, user_id ORDER BY updated_at DESC) as is_public
             FROM rom_notes
-        """
-        )
-    )
+        """))
 
     for row in result:
         connection.execute(
-            text(
-                """
+            text("""
                 UPDATE rom_user 
                 SET note_raw_markdown = :content, note_is_public = :is_public 
                 WHERE rom_id = :rom_id AND user_id = :user_id
-            """
-            ),
+            """),
             {
                 "content": row.content,
                 "is_public": row.is_public,
@@ -168,20 +150,9 @@ def downgrade() -> None:
             },
         )
 
-    # Drop indexes and table
-    if is_mysql(connection) or is_mariadb(connection):
-        # The content index was created with a specific length using raw SQL for MySQL/MariaDB,
-        # so we drop it with raw SQL as well.
-        connection.execute(
-            text("DROP INDEX IF EXISTS idx_rom_notes_content ON rom_notes")
-        )
-    else:
-        # For other databases, the content index was created with op.create_index.
-        op.drop_index("idx_rom_notes_content", table_name="rom_notes")
-
     # These indexes were created with op.create_index for all dialects.
-    op.drop_index("idx_rom_notes_title", table_name="rom_notes")
-    op.drop_index("idx_rom_notes_rom_user", table_name="rom_notes")
-    op.drop_index("idx_rom_notes_public", table_name="rom_notes")
+    op.drop_index("idx_rom_notes_title", table_name="rom_notes", if_exists=True)
+    op.drop_index("idx_rom_notes_rom_user", table_name="rom_notes", if_exists=True)
+    op.drop_index("idx_rom_notes_public", table_name="rom_notes", if_exists=True)
 
-    op.drop_table("rom_notes")
+    op.drop_table("rom_notes", if_exists=True)

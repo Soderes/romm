@@ -22,10 +22,23 @@ const { t } = useI18n();
           />
         </v-avatar>
       </template>
-      {{ platform.display_name }}
+      <div class="text-no-wrap">
+        {{ platform.display_name }}
+      </div>
       <template #append>
         <v-chip class="ml-3" color="primary" size="x-small" label>
           {{ platform.roms.length }}
+        </v-chip>
+        <v-chip
+          v-if="platform.firmware_count > 0"
+          class="ml-1"
+          color="secondary"
+          size="x-small"
+          label
+          :title="t('scan.firmware-found', platform.firmware_count)"
+        >
+          <v-icon start size="x-small">mdi-memory</v-icon>
+          {{ platform.firmware_count }}
         </v-chip>
         <v-chip
           v-if="!platform.is_identified"
@@ -166,10 +179,23 @@ const { t } = useI18n();
               <v-img src="/assets/scrappers/esde.png" />
             </v-avatar>
           </v-chip>
+          <v-chip
+            v-if="rom.libretro_id"
+            class="pa-1 bg-surface"
+            size="small"
+            title="Libretro match"
+          >
+            <v-avatar variant="text" size="18" rounded>
+              <v-img src="/assets/scrappers/libretro.png" />
+            </v-avatar>
+          </v-chip>
         </template>
       </template>
     </RomListItem>
-    <v-list-item v-if="platform.roms.length == 0" class="text-center my-2">
+    <v-list-item
+      v-if="platform.roms.length === 0 && platform.firmware_count === 0"
+      class="text-center my-2"
+    >
       {{ t("scan.no-new-roms") }}
     </v-list-item>
   </v-expansion-panel-text>

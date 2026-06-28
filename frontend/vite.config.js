@@ -65,8 +65,8 @@ export default defineConfig(({ mode }) => {
   };
 
   const backendPort = env.DEV_PORT ?? "5000";
-  // const devMode = env.DEV_MODE === "true";
   const httpsMode = env.DEV_HTTPS === "true";
+  const pwaDevEnabled = env.DEV_PWA === "true";
 
   return {
     optimizeDeps: {
@@ -96,7 +96,7 @@ export default defineConfig(({ mode }) => {
           ],
         },
         devOptions: {
-          enabled: true,
+          enabled: pwaDevEnabled,
           type: "module",
         },
       }),
@@ -113,10 +113,17 @@ export default defineConfig(({ mode }) => {
     resolve: {
       alias: {
         "@": fileURLToPath(new URL("./src", import.meta.url)),
+        "@v2": fileURLToPath(new URL("./src/v2", import.meta.url)),
       },
       extensions: [".js", ".json", ".jsx", ".mjs", ".ts", ".tsx", ".vue"],
     },
     server: {
+      watch: {
+        // Never crawl the served library resources: this path is a symlink
+        // into the user's library (covers, screenshots) and can hold hundreds
+        // of thousands of files, which OOMs the dev server's file watcher.
+        ignored: ["**/assets/romm/resources/**", "**/assets/romm/resources"],
+      },
       proxy: {
         "/api": {
           target: `http://127.0.0.1:${backendPort}`,

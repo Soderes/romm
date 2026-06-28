@@ -10,7 +10,7 @@ from config import (
     SCHEDULED_UPDATE_LAUNCHBOX_METADATA_CRON,
 )
 from handler.metadata import meta_launchbox_handler
-from handler.metadata.launchbox_handler import (
+from handler.metadata.launchbox_handler.types import (
     LAUNCHBOX_FILES_KEY,
     LAUNCHBOX_MAME_KEY,
     LAUNCHBOX_METADATA_ALTERNATE_NAME_KEY,
@@ -44,7 +44,7 @@ class UpdateLaunchboxMetadataTask(RemoteFilePullTask):
     async def run(self, force: bool = False) -> dict[str, Any]:
         update_stats = UpdateStats()
 
-        if not meta_launchbox_handler.is_enabled():
+        if not meta_launchbox_handler.is_cloud_enabled():
             log.warning("Launchbox API is not enabled, skipping metadata update")
             return update_stats.to_dict()
 
@@ -126,7 +126,7 @@ class UpdateLaunchboxMetadataTask(RemoteFilePullTask):
                                             await pipe.hset(
                                                 LAUNCHBOX_METADATA_NAME_KEY,
                                                 mapping={
-                                                    f"{name_elem.text}:{platform_elem.text}": json.dumps(
+                                                    f"{name_elem.text.lower()}:{platform_elem.text}": json.dumps(
                                                         {
                                                             child.tag: child.text
                                                             for child in elem
@@ -145,7 +145,7 @@ class UpdateLaunchboxMetadataTask(RemoteFilePullTask):
                                             await pipe.hset(
                                                 LAUNCHBOX_METADATA_ALTERNATE_NAME_KEY,
                                                 mapping={
-                                                    alternate_name_elem.text: json.dumps(
+                                                    alternate_name_elem.text.lower(): json.dumps(
                                                         {
                                                             child.tag: child.text
                                                             for child in elem
@@ -257,7 +257,7 @@ class UpdateLaunchboxMetadataTask(RemoteFilePullTask):
                                 processed_files += 1
                                 update_stats.update(processed=processed_files)
 
-        except zipfile.BadZipFile:
+        except (zipfile.BadZipFile, RuntimeError, OSError):
             log.error("Bad zip file in launchbox metadata update")
             return update_stats.to_dict()
 

@@ -36,7 +36,7 @@ onMounted(async () => {
       romId.value = response.data.id;
     })
     .catch((error) => {
-      console.error("Error fetching ROM by metadata provider:", error);
+      console.warn("Error fetching ROM by metadata provider:", error);
       // Keep romId.value as null to fall back to IGDB link
     });
 });
@@ -57,10 +57,9 @@ onMounted(async () => {
         v-bind="props"
         :src="game.cover_url || missingCoverImage"
         :aspect-ratio="computedAspectRatio"
-        cover
       >
         <v-chip
-          class="px-2 position-absolute chip-type text-white translucent"
+          class="px-2 position-absolute chip-type translucent"
           density="compact"
           label
         >

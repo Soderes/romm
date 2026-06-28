@@ -1,23 +1,32 @@
-import type { ScreenshotSchema } from "@/__generated__";
+import type { AxiosProgressEvent } from "axios";
+import type {
+  Body_add_screenshot_api_screenshots_post as AddScreenshotInput,
+  DetailedRomSchema,
+  ScreenshotSchema,
+} from "@/__generated__";
 import api from "@/services/api";
-import type { DetailedRom } from "@/stores/roms";
+import storeUpload from "@/stores/upload";
+import { buildFormInput } from "@/utils/formData";
 
 export const screenshotApi = api;
+
+type ScreenshotUploadInput = AddScreenshotInput & {
+  screenshotFile: File;
+};
 
 async function uploadScreenshots({
   rom,
   screenshotsToUpload,
   emulator,
 }: {
-  rom: DetailedRom;
-  screenshotsToUpload: {
-    screenshotFile: File;
-  }[];
+  rom: DetailedRomSchema;
+  screenshotsToUpload: ScreenshotUploadInput[];
   emulator?: string;
-}): Promise<PromiseSettledResult<ScreenshotSchema>[]> {
+}) {
   const promises = screenshotsToUpload.map(({ screenshotFile }) => {
-    const formData = new FormData();
-    formData.append("screenshotFile", screenshotFile);
+    const formData = buildFormInput<ScreenshotUploadInput>([
+      ["screenshotFile", screenshotFile],
+    ]);
 
     return new Promise<ScreenshotSchema>((resolve, reject) => {
       api
@@ -37,20 +46,61 @@ async function uploadScreenshots({
   return Promise.allSettled(promises);
 }
 
-async function updateScreenshot({
-  screenshot,
-  screenshotFile,
+// ---------- v2 per-user gallery screenshots ----------
+// Mirrors the soundtrack upload flow (upload-store progress + allSettled).
+async function uploadGalleryScreenshots({
+  romId,
+  filesToUpload,
 }: {
-  screenshot: ScreenshotSchema;
-  screenshotFile: File;
-}): Promise<{ data: ScreenshotSchema }> {
-  const formData = new FormData();
-  formData.append("screenshotFile", screenshotFile);
+  romId: number;
+  filesToUpload: File[];
+}) {
+  const uploadStore = storeUpload();
 
-  return api.put(`/screenshots/${screenshot.id}`, formData);
+  const promises = filesToUpload.map((file) => {
+    const formData = new FormData();
+    formData.append("screenshotFile", file);
+
+    uploadStore.start(file.name);
+    return new Promise<ScreenshotSchema>((resolve, reject) => {
+      api
+        .post<ScreenshotSchema>("/screenshots", formData, {
+          headers: { "Content-Type": "multipart/form-data" },
+          params: { rom_id: romId },
+          onUploadProgress: (progressEvent: AxiosProgressEvent) => {
+            uploadStore.update(file.name, progressEvent);
+          },
+        })
+        .then(({ data }) => resolve(data))
+        .catch((error) => {
+          uploadStore.fail(file.name, error.response?.data?.detail);
+          reject(error);
+        });
+    });
+  });
+
+  return Promise.allSettled(promises);
+}
+
+async function deleteScreenshot({ id }: { id: number }) {
+  return api.delete(`/screenshots/${id}`);
+}
+
+async function setScreenshotVisibility({
+  id,
+  isPublic,
+}: {
+  id: number;
+  isPublic: boolean;
+}) {
+  return api.put<ScreenshotSchema>(`/screenshots/${id}`, {
+    is_public: isPublic,
+  });
 }
 
 export default {
   uploadScreenshots,
-  updateScreenshot,
+  uploadGalleryScreenshots,
+  deleteScreenshot,
+  setScreenshotVisibility,
 };

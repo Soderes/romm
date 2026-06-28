@@ -23,9 +23,8 @@ import storePlatforms from "@/stores/platforms";
 import storeRoms from "@/stores/roms";
 import type { Events } from "@/types/emitter";
 
-// Dynamic import for PDFViewer
-const PdfViewer = defineAsyncComponent(
-  () => import("@/components/Details/PDFViewer.vue"),
+const MediaTab = defineAsyncComponent(
+  () => import("@/components/Details/MediaTab.vue"),
 );
 
 const { t } = useI18n();
@@ -35,7 +34,7 @@ const router = useRouter();
 // Valid tab values
 const validTabs = [
   "details",
-  "manual",
+  "media",
   "gamedata",
   "personal",
   "timetobeat",
@@ -47,7 +46,7 @@ const validTabs = [
 // Initialize tab from query parameter or default to "details"
 const tab = ref<
   | "details"
-  | "manual"
+  | "media"
   | "gamedata"
   | "personal"
   | "timetobeat"
@@ -58,7 +57,7 @@ const tab = ref<
   validTabs.includes(route.query.tab as any)
     ? (route.query.tab as
         | "details"
-        | "manual"
+        | "media"
         | "gamedata"
         | "personal"
         | "timetobeat"
@@ -157,12 +156,18 @@ watch(
     <BackgroundHeader />
 
     <v-row
-      class="px-6 mb-6"
+      :class="{ 'justify-center px-6': mdAndDown, 'd-flex px-16': lgAndUp }"
       no-gutters
-      :class="{ 'justify-center': smAndDown }"
     >
-      <v-col cols="auto">
-        <v-container id="artwork-container" :width="270" class="pa-0">
+      <v-col
+        :cols="mdAndDown ? 'auto' : undefined"
+        :style="mdAndUp ? 'flex: 0 0 270px; width: 270px' : undefined"
+      >
+        <v-container
+          id="artwork-container"
+          :width="mdAndDown ? 270 : undefined"
+          class="pa-0"
+        >
           <GameCard
             :key="currentRom.updated_at"
             :rom="currentRom"
@@ -174,17 +179,7 @@ watch(
         </v-container>
       </v-col>
 
-      <v-col
-        :md="
-          !(
-            lgAndUp &&
-            (currentRom.igdb_metadata?.expansions?.length ||
-              currentRom.igdb_metadata?.dlcs?.length)
-          )
-            ? 8
-            : 7
-        "
-      >
+      <v-col class="flex-grow-1">
         <div :class="{ 'position-absolute title-desktop pl-4': mdAndUp }">
           <TitleInfo :rom="currentRom" />
         </div>
@@ -201,8 +196,8 @@ watch(
             <v-tab value="details">
               {{ t("rom.details") }}
             </v-tab>
-            <v-tab v-if="currentRom.has_manual" value="manual">
-              {{ t("rom.manual") }}
+            <v-tab value="media">
+              {{ t("rom.media") }}
             </v-tab>
             <v-tab value="gamedata">{{ t("rom.save-data") }}</v-tab>
             <v-tab value="personal">
@@ -243,8 +238,8 @@ watch(
                   </v-col>
                 </v-row>
               </v-window-item>
-              <v-window-item value="manual">
-                <PdfViewer v-if="currentRom.has_manual" :rom="currentRom" />
+              <v-window-item value="media">
+                <MediaTab :rom="currentRom" />
               </v-window-item>
               <v-window-item value="gamedata">
                 <GameData :rom="currentRom" />
@@ -281,15 +276,14 @@ watch(
         </v-row>
       </v-col>
 
-      <v-col
-        v-if="
-          lgAndUp &&
-          (currentRom.igdb_metadata?.expansions?.length ||
-            currentRom.igdb_metadata?.dlcs?.length)
-        "
-        cols="auto"
-      >
-        <v-container class="pa-0">
+      <v-col v-if="lgAndUp" style="flex: 0 0 270px; width: 270px">
+        <v-container
+          v-if="
+            currentRom.igdb_metadata?.expansions?.length ||
+            currentRom.igdb_metadata?.dlcs?.length
+          "
+          class="pa-0"
+        >
           <AdditionalContent class="mt-2" :rom="currentRom" />
         </v-container>
       </v-col>

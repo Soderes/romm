@@ -14,8 +14,11 @@ import storeConfig from "@/stores/config";
 import storeHeartbeat, { type MetadataOption } from "@/stores/heartbeat";
 import storePlatforms from "@/stores/platforms";
 import storeScanning from "@/stores/scanning";
+import { platformCategoryToIcon } from "@/utils";
 
 const LOCAL_STORAGE_METADATA_SOURCES_KEY = "scan.metadataSources";
+const LOCAL_STORAGE_LAUNCHBOX_REMOTE_ENABLED_KEY =
+  "scan.launchboxRemoteEnabled";
 const { t } = useI18n();
 const { xs, smAndDown } = useDisplay();
 const scanningStore = storeScanning();
@@ -43,18 +46,15 @@ const calculateHashes = computed(
 const metadataOptions = computed(() => {
   return heartbeat.getMetadataOptionsByPriority().map((option) => {
     // Check if option requires hashes but hash calculation is disabled
-    const requiresHashes = option.value === "hasheous" || option.value === "ra";
+    const requiresHashes =
+      option.value === "hasheous" ||
+      option.value === "ra" ||
+      option.value === "playmatch";
     const hashingDisabled = !calculateHashes.value;
-
-    let disabled = option.disabled;
-
-    if (hashingDisabled && requiresHashes) {
-      if (option.value === "hasheous") {
-        disabled = t("scan.hasheous-requires-hashes");
-      } else if (option.value === "ra") {
-        disabled = t("scan.retroachievements-requires-hashes");
-      }
-    }
+    const disabled =
+      hashingDisabled && requiresHashes
+        ? t("scan.requires-hashes", { source: option.name })
+        : option.disabled;
 
     return {
       ...option,
@@ -66,10 +66,18 @@ const storedMetadataSources = useLocalStorage(
   LOCAL_STORAGE_METADATA_SOURCES_KEY,
   [] as string[],
 );
+const launchboxRemoteEnabled = useLocalStorage(
+  LOCAL_STORAGE_LAUNCHBOX_REMOTE_ENABLED_KEY,
+  true,
+);
 const metadataSources = ref<MetadataOption[]>(
   metadataOptions.value.filter(
     (m) => storedMetadataSources.value.includes(m.value) && !m.disabled,
   ) || heartbeat.getEnabledMetadataOptions(),
+);
+
+const isLaunchboxSelected = computed(() =>
+  metadataSources.value.some((s) => s.value === "launchbox"),
 );
 
 watch(metadataOptions, (newOptions) => {
@@ -79,16 +87,20 @@ watch(metadataOptions, (newOptions) => {
   );
 });
 
-// Adding each new scanned platform to panelIndex to be open by default
-watch(
-  scanningPlatforms,
-  () => {
-    panels.value = scanningPlatforms.value
-      .map((p, index) => (p.roms.length > 0 ? index : -1))
-      .filter((index) => index !== -1);
-  },
-  { deep: true },
+// Track which platforms have ROMs/firmware without a deep watch on the entire array.
+// The computed returns a stable string that only changes when a platform
+// transitions from 0→1+ ROMs/firmware (or back), so the watch fires O(n_platforms)
+// times rather than O(n_roms) times.
+const platformsWithRomsKey = computed(() =>
+  scanningPlatforms.value
+    .map((p) => (p.roms.length > 0 || p.firmware_count > 0 ? 1 : 0))
+    .join(""),
 );
+watch(platformsWithRomsKey, () => {
+  panels.value = scanningPlatforms.value
+    .map((p, index) => (p.roms.length > 0 || p.firmware_count > 0 ? index : -1))
+    .filter((index) => index !== -1);
+});
 
 const scanOptions = [
   {
@@ -137,6 +149,7 @@ async function scan() {
     platforms: platformsToScan.value,
     type: scanType.value,
     apis: metadataSources.value.map((s) => s.value),
+    launchbox_remote_enabled: launchboxRemoteEnabled.value,
   });
 }
 
@@ -160,7 +173,7 @@ async function stopScan() {
             :items="sortedPlatforms"
             :menu-props="{ maxHeight: 650 }"
             :label="t('common.platforms')"
-            item-title="name"
+            item-title="display_name"
             item-value="id"
             prepend-inner-icon="mdi-controller"
             variant="outlined"
@@ -171,12 +184,7 @@ async function stopScan() {
             chips
           >
             <template #item="{ props, item }">
-              <v-list-item
-                v-bind="props"
-                class="py-4"
-                :title="item.raw.name ?? ''"
-                :subtitle="item.raw.fs_slug"
-              >
+              <v-list-item v-bind="props" class="py-4">
                 <template #prepend>
                   <PlatformIcon
                     :key="item.raw.slug"
@@ -186,6 +194,23 @@ async function stopScan() {
                     :fs-slug="item.raw.fs_slug"
                   />
                 </template>
+                <v-row no-gutters>
+                  <v-col>
+                    <v-chip size="x-small" label class="text-grey">{{
+                      item.raw.fs_slug
+                    }}</v-chip>
+                    <v-icon
+                      :icon="platformCategoryToIcon(item.raw.category || '')"
+                      class="ml-2 text-caption text-grey"
+                      :title="item.raw.category"
+                    />
+                    <span
+                      v-if="item.raw.family_name"
+                      class="ml-1 text-caption text-grey"
+                      >{{ item.raw.family_name }}</span
+                    >
+                  </v-col>
+                </v-row>
                 <template #append>
                   <MissingFromFSIcon
                     v-if="item.raw.missing_from_fs"
@@ -197,7 +222,7 @@ async function stopScan() {
                   />
                   <v-row
                     v-if="item.raw.is_identified"
-                    class="text-white text-shadow text-center"
+                    class="text-center"
                     no-gutters
                   >
                     <v-col cols="12">
@@ -274,20 +299,26 @@ async function stopScan() {
 
                       <v-avatar
                         v-if="item.raw.hltb_slug"
-                        class="bg-surface"
+                        class="bg-surface mr-1"
                         variant="text"
                         size="25"
                         rounded
                       >
                         <v-img src="/assets/scrappers/hltb.png" />
                       </v-avatar>
+
+                      <v-avatar
+                        v-if="item.raw.libretro_slug"
+                        class="bg-surface"
+                        variant="text"
+                        size="25"
+                        rounded
+                      >
+                        <v-img src="/assets/scrappers/libretro.png" />
+                      </v-avatar>
                     </v-col>
                   </v-row>
-                  <v-row
-                    v-else
-                    class="text-white text-shadow text-center"
-                    no-gutters
-                  >
+                  <v-row v-else class="text-center" no-gutters>
                     <v-chip color="red" size="small" label>
                       <v-icon class="mr-1"> mdi-close </v-icon>
                       {{ t("scan.not-identified").toUpperCase() }}
@@ -309,7 +340,7 @@ async function stopScan() {
                   :size="20"
                 />
                 <div class="ml-1">
-                  {{ item.raw.name }}
+                  {{ item.raw.display_name }}
                 </div>
               </v-chip>
             </template>
@@ -349,6 +380,32 @@ async function stopScan() {
                   <v-avatar size="25" rounded="1">
                     <v-img :src="item.raw.logo_path" />
                   </v-avatar>
+                </template>
+
+                <template #append v-if="item.raw.value === 'launchbox'">
+                  <div class="d-flex align-center">
+                    <span
+                      class="text-caption text-primary text-medium-emphasis mr-4"
+                      :class="{ 'text-romm-gray': launchboxRemoteEnabled }"
+                    >
+                      Local
+                    </span>
+                    <v-switch
+                      v-model="launchboxRemoteEnabled"
+                      color="primary"
+                      density="compact"
+                      hide-details
+                      :disabled="!isLaunchboxSelected"
+                      @click.stop
+                      @mousedown.stop
+                    />
+                    <span
+                      class="text-caption text-primary text-medium-emphasis ml-4"
+                      :class="{ 'text-romm-gray': !launchboxRemoteEnabled }"
+                    >
+                      Cloud
+                    </span>
+                  </div>
                 </template>
               </v-list-item>
             </template>
@@ -397,6 +454,7 @@ async function stopScan() {
                       <a
                         href="https://docs.romm.app/latest/Usage/LibraryManagement/#scan"
                         target="_blank"
+                        rel="noopener"
                         style="font-style: italic; text-decoration: underline"
                       >
                         {{ t("scan.scan-types-more-info") }}
@@ -593,6 +651,23 @@ async function stopScan() {
                 scanStats.identified_roms,
                 scanStats.scanned_roms,
               ),
+            })
+          }}</span>
+        </v-chip>
+        <v-chip
+          color="secondary"
+          size="small"
+          text-color="white"
+          class="ml-1 my-1"
+        >
+          <v-icon left> mdi-memory </v-icon>
+          <span v-if="xs" class="ml-2">{{
+            t("scan.firmware-scanned-n", scanStats.scanned_firmware)
+          }}</span>
+          <span v-else class="ml-2">{{
+            t("scan.firmware-scanned-with-details", {
+              n_scanned_firmware: scanStats.scanned_firmware,
+              n_new_firmware: scanStats.new_firmware,
             })
           }}</span>
         </v-chip>

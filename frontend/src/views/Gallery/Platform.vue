@@ -48,7 +48,7 @@ async function fetchRoms() {
   });
 
   romsStore
-    .fetchRoms({ galleryFilter: galleryFilterStore })
+    .fetchRoms()
     .then(() => {
       emitter?.emit("showLoadingDialog", {
         loading: false,
@@ -57,7 +57,7 @@ async function fetchRoms() {
     })
     .catch((error) => {
       emitter?.emit("snackbarShow", {
-        msg: `Couldn't fetch roms for platform ID ${currentPlatform.value?.id}: ${error}`,
+        msg: `Couldn't fetch ROMs for platform ID ${currentPlatform.value?.id}: ${error}`,
         icon: "mdi-close-circle",
         color: "red",
         timeout: 4000,
@@ -116,16 +116,15 @@ function onGameTouchEnd() {
   clearTimeout(timeout);
 }
 
-const { y: documentY } = useScroll(document.body, { throttle: 500 });
+const { y: windowY } = useScroll(window, { throttle: 500 });
 
-watch(documentY, () => {
+watch(windowY, () => {
   clearTimeout(timeout);
 
   window.setTimeout(async () => {
-    scrolledToTop.value = documentY.value === 0;
+    scrolledToTop.value = windowY.value === 0;
     if (
-      documentY.value + window.innerHeight >=
-        document.body.scrollHeight - 300 &&
+      windowY.value + window.innerHeight >= document.body.scrollHeight - 300 &&
       fetchTotalRoms.value > filteredRoms.value.length
     ) {
       await fetchRoms();
@@ -216,10 +215,7 @@ onBeforeRouteUpdate(async (to, from) => {
     <template
       v-if="currentPlatform && fetchingRoms && filteredRoms.length === 0"
     >
-      <Skeleton
-        :platform-id="currentPlatform.id"
-        :rom-count="currentPlatform.rom_count"
-      />
+      <Skeleton :rom-count="currentPlatform.rom_count" />
     </template>
     <template v-else>
       <template v-if="filteredRoms.length > 0">
@@ -228,7 +224,7 @@ onBeforeRouteUpdate(async (to, from) => {
           <v-col
             v-for="rom in filteredRoms"
             :key="rom.id"
-            class="pa-1 align-self-end"
+            class="pa-1 align-self-center"
             :cols="views[currentView]['size-cols']"
             :sm="views[currentView]['size-sm']"
             :md="views[currentView]['size-md']"

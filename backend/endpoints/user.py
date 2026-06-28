@@ -1,3 +1,4 @@
+import json
 from typing import Annotated, Any, cast
 
 from fastapi import Body, Form, HTTPException
@@ -11,6 +12,7 @@ from handler.auth import auth_handler
 from handler.auth.constants import Scope
 from handler.database import db_user_handler
 from handler.filesystem import fs_asset_handler
+from handler.filesystem.assets_handler import validate_image_upload
 from handler.metadata import meta_ra_handler
 from handler.metadata.ra_handler import RAUserProgression
 from logger.logger import log
@@ -107,12 +109,16 @@ def add_user(
     [],
     status_code=status.HTTP_201_CREATED,
 )
-def create_invite_link(request: Request, role: str) -> InviteLinkSchema:
+def create_invite_link(
+    request: Request, role: str, expiration: int | None = None
+) -> InviteLinkSchema:
     """Create an invite link for a user.
 
     Args:
         request (Request): FastAPI Request object
         role (str): The role of the user
+        expiration (int | None): Token expiration in seconds. Defaults to
+            the INVITE_TOKEN_EXPIRY_SECONDS environment variable.
 
     Returns:
         InviteLinkSchema: Invite link
@@ -135,7 +141,17 @@ def create_invite_link(request: Request, role: str) -> InviteLinkSchema:
             detail=msg,
         )
 
-    token = auth_handler.generate_invite_link_token(request.user, role=role)
+    if expiration is not None and expiration <= 0:
+        msg = "Invite link expiration must be a positive integer"
+        log.error(msg)
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=msg,
+        )
+
+    token = auth_handler.generate_invite_link_token(
+        request.user, role=role, expiration=expiration
+    )
     return InviteLinkSchema.model_validate({"token": token})
 
 
@@ -211,6 +227,23 @@ def get_users(request: Request) -> list[UserSchema]:
     return [UserSchema.model_validate(u) for u in db_user_handler.get_users()]
 
 
+@protected_route(router.get, "/identifiers", [Scope.USERS_READ])
+def get_user_identifiers(
+    request: Request,
+) -> list[int]:
+    """Get all user identifiers endpoint
+
+    Args:
+        request (Request): Fastapi Request object
+
+    Returns:
+        list[int]: All user ids stored in the RomM's database
+    """
+
+    users = db_user_handler.get_users(only_fields=[User.id])
+    return [u.id for u in users]
+
+
 @protected_route(router.get, "/me", [Scope.ME_READ])
 def get_current_user(request: Request) -> UserSchema | None:
     """Get current user endpoint
@@ -222,7 +255,7 @@ def get_current_user(request: Request) -> UserSchema | None:
         UserSchema | None: Current user
     """
 
-    return request.user
+    return UserSchema.from_orm_with_request(request.user, request)
 
 
 @protected_route(router.get, "/{id}", [Scope.USERS_READ])
@@ -335,10 +368,30 @@ async def update_user(
     if form_data.ra_username:
         cleaned_data["ra_username"] = form_data.ra_username  # type: ignore[assignment]
 
+    if form_data.ui_settings is not None:
+        try:
+            ui_settings = json.loads(form_data.ui_settings)
+            if not isinstance(ui_settings, dict):
+                msg = f"Invalid ui_settings JSON: {ui_settings}"
+                log.error(msg)
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail=msg,
+                )
+            cleaned_data["ui_settings"] = ui_settings  # type: ignore[assignment]
+        except (json.JSONDecodeError, ValueError) as exc:
+            msg = f"Invalid ui_settings JSON: {str(exc)}"
+            log.error(msg)
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=msg,
+            ) from exc
+
     if form_data.avatar is not None and form_data.avatar.filename is not None:
+        safe_extension = validate_image_upload(form_data.avatar, label="Avatar")
+
         user_avatar_path = fs_asset_handler.build_avatar_path(user=db_user)
-        file_extension = form_data.avatar.filename.split(".")[-1]
-        file_name = f"avatar.{file_extension}"
+        file_name = f"avatar.{safe_extension}"
 
         await fs_asset_handler.write_file(
             file=form_data.avatar.file, path=user_avatar_path, filename=file_name

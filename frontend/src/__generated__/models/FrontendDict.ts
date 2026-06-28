@@ -3,8 +3,8 @@
 /* tslint:disable */
 /* eslint-disable */
 export type FrontendDict = {
-    UPLOAD_TIMEOUT: number;
     DISABLE_USERPASS_LOGIN: boolean;
+    DISABLE_LOGS_VIEWER: boolean;
     YOUTUBE_BASE_URL: string;
 };
 

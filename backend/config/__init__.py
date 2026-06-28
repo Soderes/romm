@@ -41,6 +41,17 @@ FRONTEND_RESOURCES_PATH: Final[str] = "/assets/romm/resources"
 # SEVEN ZIP
 SEVEN_ZIP_TIMEOUT: Final[int] = safe_int(_get_env("SEVEN_ZIP_TIMEOUT"), 60)
 
+# ROM PATCHER
+ROM_PATCHER_TIMEOUT: Final[int] = safe_int(_get_env("ROM_PATCHER_TIMEOUT"), 120)
+# RomPatcher.js loads the whole ROM into memory in Node, so cap inputs to avoid OOM.
+ROM_PATCHER_MAX_FILE_SIZE_BYTES: Final[int] = safe_int(
+    _get_env("ROM_PATCHER_MAX_FILE_SIZE_BYTES"), 4 * 1024 * 1024 * 1024  # 4 GiB
+)
+# Limit concurrent patch subprocesses to bound total memory use.
+ROM_PATCHER_MAX_CONCURRENCY: Final[int] = max(
+    1, safe_int(_get_env("ROM_PATCHER_MAX_CONCURRENCY"), 2)
+)
+
 # DATABASE
 DB_HOST: Final[str | None] = _get_env("DB_HOST")
 DB_PORT: Final[int] = safe_int(_get_env("DB_PORT"), 3306)
@@ -89,6 +100,7 @@ REFRESH_RETROACHIEVEMENTS_CACHE_DAYS: Final[int] = safe_int(
 )
 
 # LAUNCHBOX
+LAUNCHBOX_BASE_PATH: Final[str] = f"{ROMM_BASE_PATH}/launchbox"
 LAUNCHBOX_API_ENABLED: Final[bool] = safe_str_to_bool(_get_env("LAUNCHBOX_API_ENABLED"))
 
 # PLAYMATCH
@@ -113,6 +125,14 @@ ROMM_AUTH_SECRET_KEY: Final[str] = _get_env("ROMM_AUTH_SECRET_KEY", "")
 if not ROMM_AUTH_SECRET_KEY:
     raise ValueError("ROMM_AUTH_SECRET_KEY environment variable is not set!")
 
+OAUTH_ACCESS_TOKEN_EXPIRE_SECONDS: Final[int] = safe_int(
+    _get_env("OAUTH_ACCESS_TOKEN_EXPIRE_SECONDS"), 30 * 60
+)  # 30 minutes, in seconds
+
+OAUTH_REFRESH_TOKEN_EXPIRE_SECONDS: Final[int] = safe_int(
+    _get_env("OAUTH_REFRESH_TOKEN_EXPIRE_SECONDS"), 7 * 24 * 60 * 60
+)  # 7 days, in seconds
+
 SESSION_MAX_AGE_SECONDS: Final[int] = safe_int(
     _get_env("SESSION_MAX_AGE_SECONDS"), 14 * 24 * 60 * 60
 )  # 14 days, in seconds
@@ -126,14 +146,22 @@ DISABLE_USERPASS_LOGIN: Final[bool] = safe_str_to_bool(
     _get_env("DISABLE_USERPASS_LOGIN")
 )
 DISABLE_SETUP_WIZARD: Final[bool] = safe_str_to_bool(_get_env("DISABLE_SETUP_WIZARD"))
+INVITE_TOKEN_EXPIRY_SECONDS: Final[int] = safe_int(
+    _get_env("INVITE_TOKEN_EXPIRY_SECONDS"), 10 * 60
+)
 
 # OIDC
 OIDC_ENABLED: Final[bool] = safe_str_to_bool(_get_env("OIDC_ENABLED"))
+OIDC_AUTOLOGIN: Final[bool] = safe_str_to_bool(_get_env("OIDC_AUTOLOGIN"))
+OIDC_ALLOW_REGISTRATION: Final[bool] = safe_str_to_bool(
+    _get_env("OIDC_ALLOW_REGISTRATION", "true")
+)
 OIDC_PROVIDER: Final[str] = _get_env("OIDC_PROVIDER", "")
 OIDC_CLIENT_ID: Final[str] = _get_env("OIDC_CLIENT_ID", "")
 OIDC_CLIENT_SECRET: Final[str] = _get_env("OIDC_CLIENT_SECRET", "")
 OIDC_REDIRECT_URI: Final[str] = _get_env("OIDC_REDIRECT_URI", "")
 OIDC_SERVER_APPLICATION_URL: Final[str] = _get_env("OIDC_SERVER_APPLICATION_URL", "")
+OIDC_SERVER_METADATA_URL: Final[str | None] = _get_env("OIDC_SERVER_METADATA_URL")
 OIDC_CLAIM_ROLES: Final[str] = _get_env("OIDC_CLAIM_ROLES", "")
 OIDC_ROLE_VIEWER: Final[str | None] = _get_env("OIDC_ROLE_VIEWER")
 OIDC_ROLE_EDITOR: Final[str | None] = _get_env("OIDC_ROLE_EDITOR")
@@ -142,6 +170,10 @@ OIDC_TLS_CACERTFILE: Final[str | None] = _get_env("OIDC_TLS_CACERTFILE")
 OIDC_USERNAME_ATTRIBUTE: Final[str] = _get_env(
     "OIDC_USERNAME_ATTRIBUTE", "preferred_username"
 )
+OIDC_RP_INITIATED_LOGOUT: Final[bool] = safe_str_to_bool(
+    _get_env("OIDC_RP_INITIATED_LOGOUT")
+)
+OIDC_END_SESSION_ENDPOINT: Final[str] = _get_env("OIDC_END_SESSION_ENDPOINT", "")
 
 # SCANS
 SCAN_TIMEOUT: Final[int] = safe_int(_get_env("SCAN_TIMEOUT"), 60 * 60 * 4)  # 4 hours
@@ -195,13 +227,33 @@ SCHEDULED_RETROACHIEVEMENTS_PROGRESS_SYNC_CRON: Final[str] = _get_env(
     "0 4 * * *",  # At 4:00 AM every day
 )
 
+# SYNC
+SYNC_BASE_PATH: Final[str] = f"{ROMM_BASE_PATH}/sync"
+ENABLE_SYNC_FOLDER_WATCHER: Final[bool] = safe_str_to_bool(
+    _get_env("ENABLE_SYNC_FOLDER_WATCHER")
+)
+SYNC_FOLDER_SCAN_DELAY: Final[int] = safe_int(
+    _get_env("SYNC_FOLDER_SCAN_DELAY"), 2  # 2 minutes
+)
+ENABLE_SYNC_PUSH_PULL: Final[bool] = safe_str_to_bool(_get_env("ENABLE_SYNC_PUSH_PULL"))
+SYNC_PUSH_PULL_CRON: Final[str] = _get_env(
+    "SYNC_PUSH_PULL_CRON",
+    "*/30 * * * *",  # Every 30 minutes
+)
+SYNC_SSH_KEYS_PATH: Final[str] = _get_env(
+    "SYNC_SSH_KEYS_PATH", f"{SYNC_BASE_PATH}/keys"
+)
+SYNC_SSH_KNOWN_HOSTS_PATH: Final[str] = _get_env(
+    "SYNC_SSH_KNOWN_HOSTS_PATH", f"{SYNC_BASE_PATH}/known_hosts"
+)
+
 # EMULATION
 DISABLE_EMULATOR_JS: Final[bool] = safe_str_to_bool(_get_env("DISABLE_EMULATOR_JS"))
 DISABLE_RUFFLE_RS: Final[bool] = safe_str_to_bool(_get_env("DISABLE_RUFFLE_RS"))
 
 # FRONTEND
-UPLOAD_TIMEOUT: Final[int] = safe_int(_get_env("UPLOAD_TIMEOUT"), 600)
 KIOSK_MODE: Final[bool] = safe_str_to_bool(_get_env("KIOSK_MODE"))
+DISABLE_LOGS_VIEWER: Final[bool] = safe_str_to_bool(_get_env("DISABLE_LOGS_VIEWER"))
 
 # LOGGING
 LOGLEVEL: Final[str] = _get_env("LOGLEVEL", "INFO").upper()
@@ -223,3 +275,15 @@ SENTRY_DSN: Final[str | None] = _get_env("SENTRY_DSN")
 
 # TESTING
 IS_PYTEST_RUN: Final = bool(_get_env("PYTEST_VERSION"))
+
+
+# PROXY
+def has_proxy_env() -> bool:
+    return any(
+        _get_env(var)
+        for var in (
+            "HTTP_PROXY",
+            "HTTPS_PROXY",
+            "NO_PROXY",
+        )
+    )

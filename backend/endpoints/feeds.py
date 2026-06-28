@@ -1,3 +1,5 @@
+import csv
+import io
 from collections.abc import Sequence
 from datetime import datetime
 from typing import Annotated
@@ -22,6 +24,11 @@ from endpoints.responses.feeds import (
     PKGiFeedPS3ItemSchema,
     PKGiFeedPSPItemSchema,
     PKGiFeedPSVitaItemSchema,
+    PkgjPSPDlcsItemSchema,
+    PkgjPSPGamesItemSchema,
+    PkgjPSVDlcsItemSchema,
+    PkgjPSVGamesItemSchema,
+    PkgjPSXGamesItemSchema,
     TinfoilFeedFileSchema,
     TinfoilFeedSchema,
     TinfoilFeedTitleDBSchema,
@@ -33,7 +40,6 @@ from endpoints.responses.feeds import (
 from handler.auth.constants import Scope
 from handler.database import db_platform_handler, db_rom_handler
 from handler.filesystem import fs_rom_handler
-from handler.filesystem.roms_handler import is_compressed_file
 from handler.metadata import meta_igdb_handler
 from handler.metadata.base_handler import (
     SONY_SERIAL_REGEX,
@@ -42,6 +48,7 @@ from handler.metadata.base_handler import (
 )
 from handler.metadata.base_handler import UniversalPlatformSlug as UPS
 from models.rom import Rom, RomFile, RomFileCategory
+from utils.archives import is_compressed_file
 from utils.router import APIRouter
 
 
@@ -95,7 +102,7 @@ def platforms_webrcade_feed(request: Request) -> WebrcadeFeedSchema:
             continue
 
         category_items = []
-        roms = db_rom_handler.get_roms_scalar(platform_id=p.id)
+        roms = db_rom_handler.get_roms_scalar(platform_ids=[p.id])
         for rom in roms:
             download_url = generate_rom_download_url(request, rom)
             category_item = WebrcadeFeedItemSchema(
@@ -162,7 +169,7 @@ async def tinfoil_index_feed(
     Returns:
         TinfoilFeedSchema: Tinfoil feed object schema
     """
-    switch = db_platform_handler.get_platform_by_fs_slug(slug)
+    switch = db_platform_handler.get_platform_by_slug(slug)
     if not switch:
         return TinfoilFeedSchema(
             files=[],
@@ -206,7 +213,7 @@ async def tinfoil_index_feed(
 
         return titledb
 
-    roms = db_rom_handler.get_roms_scalar(platform_id=switch.id)
+    roms = db_rom_handler.get_roms_scalar(platform_ids=[switch.id], include_files=True)
 
     return TinfoilFeedSchema(
         files=[
@@ -263,6 +270,34 @@ def generate_content_id(file: RomFile) -> str:
     return f"UP9644-{file.id:09d}_00-0000000000000000"
 
 
+def get_rap_data(request: Request, rom: Rom) -> tuple[str, str]:
+    """Helper to find the .rap file for a given rom"""
+    for file in rom.files:
+        if file.file_extension.lower() == "rap":
+            rap_hash = file.sha1_hash or ""
+            rap_download_url = generate_romfile_download_url(request, file)
+            return rap_hash, rap_download_url
+
+    return "", ""
+
+
+def format_pkgj_datetime(value: datetime | None) -> str:
+    if isinstance(value, datetime):
+        return value.strftime("%Y-%m-%d %H:%M:%S")
+    return ""
+
+
+def text_response(lines: list[str], filename: str) -> Response:
+    return Response(
+        content="\n".join(lines),
+        media_type="text/plain",
+        headers={
+            "Content-Disposition": f"filename={filename}",
+            "Cache-Control": "no-cache",
+        },
+    )
+
+
 @protected_route(
     router.get,
     "/pkgi/ps3/{content_type}",
@@ -282,7 +317,7 @@ def pkgi_ps3_feed(
     Returns:
         Response: txt file with PKGi PS3 database format
     """
-    ps3_platform = db_platform_handler.get_platform_by_fs_slug(UPS.PS3)
+    ps3_platform = db_platform_handler.get_platform_by_slug(UPS.PS3)
     if not ps3_platform:
         raise HTTPException(status_code=404, detail="PlayStation 3 platform not found")
 
@@ -294,10 +329,13 @@ def pkgi_ps3_feed(
             status_code=400, detail=f"Invalid content type: {content_type}"
         ) from e
 
-    roms = db_rom_handler.get_roms_scalar(platform_id=ps3_platform.id)
+    roms = db_rom_handler.get_roms_scalar(
+        platform_ids=[ps3_platform.id], include_files=True
+    )
     txt_lines = []
 
     for rom in roms:
+        rap_hash, _ = get_rap_data(request, rom)
         for file in rom.files:
             if not validate_pkgi_file(file, content_type_enum):
                 continue
@@ -311,26 +349,30 @@ def pkgi_ps3_feed(
                 type=content_type_int,
                 name=file.file_name_no_tags,
                 description="",
-                rap="",
+                rap=rap_hash,
                 url=download_url,
                 size=file.file_size_bytes,
                 checksum=file.sha1_hash or "",
             )
 
             # Format: contentid,type,name,description,rap,url,size,checksum
-            txt_line = f'{pkgi_item.contentid},{pkgi_item.type},"{pkgi_item.name}",{pkgi_item.description},{pkgi_item.rap},"{pkgi_item.url}",{pkgi_item.size},{pkgi_item.checksum}'
-            txt_lines.append(txt_line)
+            output = io.StringIO()
+            writer = csv.writer(output, quoting=csv.QUOTE_MINIMAL)
+            writer.writerow(
+                [
+                    pkgi_item.contentid,
+                    str(pkgi_item.type),
+                    pkgi_item.name,
+                    pkgi_item.description,
+                    pkgi_item.rap,
+                    pkgi_item.url,
+                    str(pkgi_item.size),
+                    pkgi_item.checksum,
+                ]
+            )
+            txt_lines.append(output.getvalue().strip())
 
-    txt_content = "\n".join(txt_lines)
-
-    return Response(
-        content=txt_content,
-        media_type="text/plain",
-        headers={
-            "Content-Disposition": f"filename=pkgi_{content_type_enum.value}.txt",
-            "Cache-Control": "no-cache",
-        },
-    )
+    return text_response(txt_lines, f"pkgi_{content_type_enum.value}.txt")
 
 
 @protected_route(
@@ -352,7 +394,7 @@ def pkgi_psvita_feed(
     Returns:
         Response: txt file with PKGi PS Vita database format
     """
-    psvita_platform = db_platform_handler.get_platform_by_fs_slug(UPS.PSVITA)
+    psvita_platform = db_platform_handler.get_platform_by_slug(UPS.PSVITA)
     if not psvita_platform:
         raise HTTPException(
             status_code=404, detail="PlayStation Vita platform not found"
@@ -365,7 +407,9 @@ def pkgi_psvita_feed(
             status_code=400, detail=f"Invalid content type: {content_type}"
         ) from e
 
-    roms = db_rom_handler.get_roms_scalar(platform_id=psvita_platform.id)
+    roms = db_rom_handler.get_roms_scalar(
+        platform_ids=[psvita_platform.id], include_files=True
+    )
     txt_lines = []
 
     for rom in roms:
@@ -388,19 +432,23 @@ def pkgi_psvita_feed(
             )
 
             # Format: contentid,flags,name,name2,zrif,url,size,checksum
-            txt_line = f'{pkgi_item.contentid},{pkgi_item.flags},"{pkgi_item.name}",{pkgi_item.name2},{pkgi_item.zrif},"{pkgi_item.url}",{pkgi_item.size},{pkgi_item.checksum}'
-            txt_lines.append(txt_line)
+            output = io.StringIO()
+            writer = csv.writer(output, quoting=csv.QUOTE_MINIMAL)
+            writer.writerow(
+                [
+                    pkgi_item.contentid,
+                    str(pkgi_item.flags),
+                    pkgi_item.name,
+                    pkgi_item.name2,
+                    pkgi_item.zrif,
+                    pkgi_item.url,
+                    str(pkgi_item.size),
+                    pkgi_item.checksum,
+                ]
+            )
+            txt_lines.append(output.getvalue().strip())
 
-    txt_content = "\n".join(txt_lines)
-
-    return Response(
-        content=txt_content,
-        media_type="text/plain",
-        headers={
-            "Content-Disposition": f"filename=pkgi_{content_type_enum.value}.txt",
-            "Cache-Control": "no-cache",
-        },
-    )
+    return text_response(txt_lines, f"pkgi_{content_type_enum.value}.txt")
 
 
 @protected_route(
@@ -422,7 +470,7 @@ def pkgi_psp_feed(
     Returns:
         Response: txt file with PKGi PSP database format
     """
-    psp_platform = db_platform_handler.get_platform_by_fs_slug(UPS.PSP)
+    psp_platform = db_platform_handler.get_platform_by_slug(UPS.PSP)
     if not psp_platform:
         raise HTTPException(
             status_code=404, detail="PlayStation Portable platform not found"
@@ -436,10 +484,13 @@ def pkgi_psp_feed(
             status_code=400, detail=f"Invalid content type: {content_type}"
         ) from e
 
-    roms = db_rom_handler.get_roms_scalar(platform_id=psp_platform.id)
+    roms = db_rom_handler.get_roms_scalar(
+        platform_ids=[psp_platform.id], include_files=True
+    )
     txt_lines = []
 
     for rom in roms:
+        rap_hash, _ = get_rap_data(request, rom)
         for file in rom.files:
             if not validate_pkgi_file(file, content_type_enum):
                 continue
@@ -453,29 +504,33 @@ def pkgi_psp_feed(
                 type=content_type_int,
                 name=file.file_name_no_tags,
                 description="",
-                rap="",
+                rap=rap_hash,
                 url=download_url,
                 size=file.file_size_bytes,
                 checksum=file.sha1_hash or "",
             )
 
             # Format: contentid,type,name,description,rap,url,size,checksum
-            txt_line = f'{pkgi_item.contentid},{pkgi_item.type},"{pkgi_item.name}",{pkgi_item.description},{pkgi_item.rap},"{pkgi_item.url}",{pkgi_item.size},{pkgi_item.checksum}'
-            txt_lines.append(txt_line)
+            output = io.StringIO()
+            writer = csv.writer(output, quoting=csv.QUOTE_MINIMAL)
+            writer.writerow(
+                [
+                    pkgi_item.contentid,
+                    str(pkgi_item.type),
+                    pkgi_item.name,
+                    pkgi_item.description,
+                    pkgi_item.rap,
+                    pkgi_item.url,
+                    str(pkgi_item.size),
+                    pkgi_item.checksum,
+                ]
+            )
+            txt_lines.append(output.getvalue().strip())
 
-    txt_content = "\n".join(txt_lines)
-
-    return Response(
-        content=txt_content,
-        media_type="text/plain",
-        headers={
-            "Content-Disposition": f"filename=pkgi_{content_type_enum.value}.txt",
-            "Cache-Control": "no-cache",
-        },
-    )
+    return text_response(txt_lines, f"pkgi_{content_type_enum.value}.txt")
 
 
-def _format_release_date(timestamp: int | None) -> str | None:
+def format_release_date(timestamp: int | None) -> str | None:
     """Format release date to MM-DD-YYYY format"""
     if not timestamp:
         return None
@@ -499,13 +554,13 @@ def fpkgi_feed(request: Request, platform_slug: str) -> Response:
     Returns:
         Response: JSON file in FPKGi format
     """
-    platform = db_platform_handler.get_platform_by_fs_slug(platform_slug)
+    platform = db_platform_handler.get_platform_by_slug(platform_slug)
     if not platform:
         raise HTTPException(
             status_code=404, detail=f"Platform {platform_slug} not found"
         )
 
-    roms = db_rom_handler.get_roms_scalar(platform_id=platform.id)
+    roms = db_rom_handler.get_roms_scalar(platform_ids=[platform.id])
     response_data = {}
 
     for rom in roms:
@@ -516,7 +571,7 @@ def fpkgi_feed(request: Request, platform_slug: str) -> Response:
             title_id=f"ROMM{str(rom.id)[-5:].zfill(5)}",
             region=rom.regions[0] if rom.regions else None,
             version=rom.revision or None,
-            release=_format_release_date(rom.metadatum.first_release_date),
+            release=format_release_date(rom.metadatum.first_release_date),
             min_fw=None,
             cover_url=str(
                 URLPath(rom.path_cover_large).make_absolute_url(request.base_url)
@@ -545,19 +600,18 @@ def kekatsu_ds_feed(request: Request, platform_slug: str) -> Response:
     Returns:
         Response: Text file with Kekatsu DS database format
     """
-    platform = db_platform_handler.get_platform_by_fs_slug(platform_slug)
+    platform = db_platform_handler.get_platform_by_slug(platform_slug)
     if not platform:
         raise HTTPException(
             status_code=404, detail=f"Platform {platform_slug} not found"
         )
 
-    roms = db_rom_handler.get_roms_scalar(platform_id=platform.id)
+    roms = db_rom_handler.get_roms_scalar(platform_ids=[platform.id])
 
     txt_lines = []
     txt_lines.append("1")  # Database version
-    txt_lines.append(
-        "\t"
-    )  # Delimiter (cannot use csv (coma) as kekatsu does not support " (double quotes) as a text delimiter)
+    # Delimiter (cannot use csv (coma) as kekatsu does not support " (double quotes) as a text delimiter)
+    txt_lines.append("\t")
 
     for rom in roms:
         download_url = generate_rom_download_url(request, rom)
@@ -583,16 +637,338 @@ def kekatsu_ds_feed(request: Request, platform_slug: str) -> Response:
         )
 
         # Format: title	platform	region	version	author	download_url	filename	size	box_art_url
-        txt_line = f"{kekatsu_item.title}\t{kekatsu_item.platform}\t{kekatsu_item.region}\t{kekatsu_item.version}\t{kekatsu_item.author}\t{kekatsu_item.download_url}\t{kekatsu_item.filename}\t{kekatsu_item.size}\t{kekatsu_item.box_art_url}"
-        txt_lines.append(txt_line)
+        output = io.StringIO()
+        writer = csv.writer(output, delimiter="\t", quoting=csv.QUOTE_MINIMAL)
+        writer.writerow(
+            [
+                kekatsu_item.title,
+                kekatsu_item.platform,
+                kekatsu_item.region,
+                kekatsu_item.version,
+                kekatsu_item.author,
+                kekatsu_item.download_url,
+                kekatsu_item.filename,
+                str(kekatsu_item.size),
+                kekatsu_item.box_art_url,
+            ]
+        )
+        txt_lines.append(output.getvalue().strip())
 
-    txt_content = "\n".join(txt_lines)
+    return text_response(txt_lines, f"kekatsu_{platform_slug}.txt")
 
-    return Response(
-        content=txt_content,
-        media_type="text/plain",
-        headers={
-            "Content-Disposition": f"filename=kekatsu_{platform_slug}.txt",
-            "Cache-Control": "no-cache",
-        },
+
+@protected_route(
+    router.get,
+    "/pkgj/psp/games",
+    [] if DISABLE_DOWNLOAD_ENDPOINT_AUTH else [Scope.ROMS_READ],
+)
+def pkgj_psp_games_feed(request: Request) -> Response:
+    platform = db_platform_handler.get_platform_by_slug(UPS.PSP)
+    if not platform:
+        raise HTTPException(
+            status_code=404, detail="PlayStation Portable platform not found"
+        )
+
+    roms = db_rom_handler.get_roms_scalar(
+        platform_ids=[platform.id], include_files=True
     )
+    txt_lines = []
+    txt_lines.append(
+        "Title ID\tRegion\tType\tName\tPKG direct link\tContent ID\tLast Modification Date\tRAP\tDownload .RAP file\tFile Size\tSHA256"
+    )
+
+    for rom in roms:
+        rap_hash, rap_download_url = get_rap_data(request, rom)
+        for file in rom.files:
+            if not validate_pkgi_file(file, RomFileCategory.GAME):
+                continue
+
+            download_url = generate_romfile_download_url(request, file)
+            content_id = generate_content_id(file)
+            last_modified = format_pkgj_datetime(file.updated_at)
+
+            pkgj_item = PkgjPSPGamesItemSchema(
+                title_id="",
+                region=rom.regions[0] if rom.regions else "",
+                type="PSP",
+                name=(file.file_name_no_tags).strip(),
+                download_link=download_url,
+                content_id=content_id,
+                last_modified=last_modified,
+                rap=rap_hash,
+                download_rap_file=rap_download_url,
+                file_size=file.file_size_bytes,
+                sha_256=file.sha1_hash or "",
+            )
+
+            output = io.StringIO()
+            writer = csv.writer(output, delimiter="\t", quoting=csv.QUOTE_MINIMAL)
+            writer.writerow(
+                [
+                    pkgj_item.title_id,
+                    pkgj_item.region,
+                    pkgj_item.type,
+                    pkgj_item.name,
+                    pkgj_item.download_link,
+                    pkgj_item.content_id,
+                    pkgj_item.last_modified,
+                    pkgj_item.rap,
+                    pkgj_item.download_rap_file,
+                    str(pkgj_item.file_size),
+                    pkgj_item.sha_256,
+                ]
+            )
+            txt_lines.append(output.getvalue().strip())
+
+    return text_response(txt_lines, "pkgj_psp_games.txt")
+
+
+@protected_route(
+    router.get,
+    "/pkgj/psp/dlc",
+    [] if DISABLE_DOWNLOAD_ENDPOINT_AUTH else [Scope.ROMS_READ],
+)
+def pkgj_psp_dlcs_feed(request: Request) -> Response:
+    platform = db_platform_handler.get_platform_by_slug(UPS.PSP)
+    if not platform:
+        raise HTTPException(
+            status_code=404, detail="PlayStation Portable platform not found"
+        )
+
+    roms = db_rom_handler.get_roms_scalar(
+        platform_ids=[platform.id], include_files=True
+    )
+    txt_lines = []
+    txt_lines.append(
+        "Title ID\tRegion\tName\tPKG direct link\tContent ID\tLast Modification Date\tRAP\tDownload .RAP file\tFile Size\tSHA256"
+    )
+
+    for rom in roms:
+        rap_hash, rap_download_url = get_rap_data(request, rom)
+        for file in rom.files:
+            if not validate_pkgi_file(file, RomFileCategory.DLC):
+                continue
+
+            download_url = generate_romfile_download_url(request, file)
+            content_id = generate_content_id(file)
+            last_modified = format_pkgj_datetime(file.updated_at)
+
+            pkgj_item = PkgjPSPDlcsItemSchema(
+                title_id="",
+                region=rom.regions[0] if rom.regions else "",
+                name=(file.file_name_no_tags).strip(),
+                download_link=download_url,
+                content_id=content_id,
+                last_modified=last_modified,
+                rap=rap_hash,
+                download_rap_file=rap_download_url,
+                file_size=file.file_size_bytes,
+                sha_256=file.sha1_hash or "",
+            )
+
+            output = io.StringIO()
+            writer = csv.writer(output, delimiter="\t", quoting=csv.QUOTE_MINIMAL)
+            writer.writerow(
+                [
+                    pkgj_item.title_id,
+                    pkgj_item.region,
+                    pkgj_item.name,
+                    pkgj_item.download_link,
+                    pkgj_item.content_id,
+                    pkgj_item.last_modified,
+                    pkgj_item.rap,
+                    pkgj_item.download_rap_file,
+                    str(pkgj_item.file_size),
+                    pkgj_item.sha_256,
+                ]
+            )
+            txt_lines.append(output.getvalue().strip())
+
+    return text_response(txt_lines, "pkgj_psp_dlc.txt")
+
+
+@protected_route(
+    router.get,
+    "/pkgj/psvita/games",
+    [] if DISABLE_DOWNLOAD_ENDPOINT_AUTH else [Scope.ROMS_READ],
+)
+def pkgj_psv_games_feed(request: Request) -> Response:
+    platform = db_platform_handler.get_platform_by_slug(UPS.PSVITA)
+    if not platform:
+        raise HTTPException(
+            status_code=404, detail="PlayStation Vita platform not found"
+        )
+
+    roms = db_rom_handler.get_roms_scalar(
+        platform_ids=[platform.id], include_files=True
+    )
+    txt_lines = []
+    txt_lines.append(
+        "Title ID\tRegion\tName\tPKG direct link\tzRIF\tContent ID\tLast Modification Date\tOriginal Name\tFile Size\tSHA256\tRequired FW\tApp Version"
+    )
+
+    for rom in roms:
+        for file in rom.files:
+            if not validate_pkgi_file(file, RomFileCategory.GAME):
+                continue
+
+            download_url = generate_romfile_download_url(request, file)
+            content_id = generate_content_id(file)
+            last_modified = format_pkgj_datetime(file.updated_at)
+
+            pkgj_item = PkgjPSVGamesItemSchema(
+                title_id="",
+                region=rom.regions[0] if rom.regions else "",
+                name=(file.file_name_no_tags).strip(),
+                download_link=download_url,
+                zrif="",
+                content_id=content_id,
+                last_modified=last_modified,
+                original_name="",
+                file_size=file.file_size_bytes,
+                sha_256=file.sha1_hash or "",
+                required_fw="",
+                app_version="",
+            )
+
+            output = io.StringIO()
+            writer = csv.writer(output, delimiter="\t", quoting=csv.QUOTE_MINIMAL)
+            writer.writerow(
+                [
+                    pkgj_item.title_id,
+                    pkgj_item.region,
+                    pkgj_item.name,
+                    pkgj_item.download_link,
+                    pkgj_item.zrif,
+                    pkgj_item.content_id,
+                    pkgj_item.last_modified,
+                    pkgj_item.original_name,
+                    str(pkgj_item.file_size),
+                    pkgj_item.sha_256,
+                    pkgj_item.required_fw,
+                    pkgj_item.app_version,
+                ]
+            )
+            txt_lines.append(output.getvalue().strip())
+
+    return text_response(txt_lines, "pkgj_psvita_games.txt")
+
+
+@protected_route(
+    router.get,
+    "/pkgj/psvita/dlc",
+    [] if DISABLE_DOWNLOAD_ENDPOINT_AUTH else [Scope.ROMS_READ],
+)
+def pkgj_psv_dlcs_feed(request: Request) -> Response:
+    platform = db_platform_handler.get_platform_by_slug(UPS.PSVITA)
+    if not platform:
+        raise HTTPException(
+            status_code=404, detail="PlayStation Vita platform not found"
+        )
+
+    roms = db_rom_handler.get_roms_scalar(
+        platform_ids=[platform.id], include_files=True
+    )
+    txt_lines = []
+    txt_lines.append(
+        "Title ID\tRegion\tName\tPKG direct link\tzRIF\tContent ID\tLast Modification Date\tFile Size\tSHA256"
+    )
+
+    for rom in roms:
+        for file in rom.files:
+            if not validate_pkgi_file(file, RomFileCategory.DLC):
+                continue
+
+            download_url = generate_romfile_download_url(request, file)
+            content_id = generate_content_id(file)
+            last_modified = format_pkgj_datetime(file.updated_at)
+
+            pkgj_item = PkgjPSVDlcsItemSchema(
+                title_id="",
+                region=rom.regions[0] if rom.regions else "",
+                name=(file.file_name_no_tags).strip(),
+                download_link=download_url,
+                zrif="",
+                content_id=content_id,
+                last_modified=last_modified,
+                file_size=file.file_size_bytes,
+                sha_256=file.sha1_hash or "",
+            )
+
+            output = io.StringIO()
+            writer = csv.writer(output, delimiter="\t", quoting=csv.QUOTE_MINIMAL)
+            writer.writerow(
+                [
+                    pkgj_item.title_id,
+                    pkgj_item.region,
+                    pkgj_item.name,
+                    pkgj_item.download_link,
+                    pkgj_item.zrif,
+                    pkgj_item.content_id,
+                    pkgj_item.last_modified,
+                    str(pkgj_item.file_size),
+                    pkgj_item.sha_256,
+                ]
+            )
+            txt_lines.append(output.getvalue().strip())
+
+    return text_response(txt_lines, "pkgj_psvita_dlc.txt")
+
+
+@protected_route(
+    router.get,
+    "/pkgj/psx/games",
+    [] if DISABLE_DOWNLOAD_ENDPOINT_AUTH else [Scope.ROMS_READ],
+)
+def pkgj_psx_games_feed(request: Request) -> Response:
+    platform = db_platform_handler.get_platform_by_slug(UPS.PSX)
+    if not platform:
+        raise HTTPException(status_code=404, detail="PlayStation platform not found")
+
+    roms = db_rom_handler.get_roms_scalar(
+        platform_ids=[platform.id], include_files=True
+    )
+    txt_lines = []
+    txt_lines.append(
+        "Title ID\tRegion\tName\tPKG direct link\tContent ID\tLast Modification Date\tOriginal Name\tFile Size\tSHA256"
+    )
+
+    for rom in roms:
+        for file in rom.files:
+            if not validate_pkgi_file(file, RomFileCategory.GAME):
+                continue
+
+            download_url = generate_romfile_download_url(request, file)
+            content_id = generate_content_id(file)
+            last_modified = format_pkgj_datetime(file.updated_at)
+
+            pkgj_item = PkgjPSXGamesItemSchema(
+                title_id="",
+                region=rom.regions[0] if rom.regions else "",
+                name=(file.file_name_no_tags).strip(),
+                download_link=download_url,
+                content_id=content_id,
+                last_modified=last_modified,
+                original_name="",
+                file_size=file.file_size_bytes,
+                sha_256=file.sha1_hash or "",
+            )
+
+            output = io.StringIO()
+            writer = csv.writer(output, delimiter="\t", quoting=csv.QUOTE_MINIMAL)
+            writer.writerow(
+                [
+                    pkgj_item.title_id,
+                    pkgj_item.region,
+                    pkgj_item.name,
+                    pkgj_item.download_link,
+                    pkgj_item.content_id,
+                    pkgj_item.last_modified,
+                    pkgj_item.original_name,
+                    str(pkgj_item.file_size),
+                    pkgj_item.sha_256,
+                ]
+            )
+            txt_lines.append(output.getvalue().strip())
+
+    return text_response(txt_lines, "pkgj_psx_games.txt")

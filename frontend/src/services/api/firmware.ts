@@ -1,4 +1,8 @@
-import type { FirmwareSchema, AddFirmwareResponse } from "@/__generated__";
+import type {
+  AddFirmwareResponse,
+  BulkOperationResponse,
+  FirmwareSchema,
+} from "@/__generated__";
 import api from "@/services/api";
 
 export const firmwareApi = api;
@@ -7,8 +11,8 @@ async function getFirmware({
   platformId = null,
 }: {
   platformId?: number | null;
-}): Promise<{ data: FirmwareSchema[] }> {
-  return firmwareApi.get(`/firmware`, {
+}) {
+  return firmwareApi.get<FirmwareSchema[]>(`/firmware`, {
     params: {
       platform_id: platformId,
     },
@@ -21,16 +25,21 @@ async function uploadFirmware({
 }: {
   platformId: number;
   files: File[];
-}): Promise<{ data: AddFirmwareResponse }> {
+}) {
   const formData = new FormData();
   files.forEach((file) => formData.append("files", file));
 
-  return firmwareApi.post(`/firmware`, formData, {
-    headers: {
-      "Content-Type": "multipart/form-data",
+  const { data } = await firmwareApi.post<AddFirmwareResponse>(
+    `/firmware`,
+    formData,
+    {
+      headers: {
+        "Content-Type": "multipart/form-data",
+      },
+      params: { platform_id: platformId },
     },
-    params: { platform_id: platformId },
-  });
+  );
+  return data;
 }
 
 async function deleteFirmware({
@@ -40,7 +49,7 @@ async function deleteFirmware({
   firmware: FirmwareSchema[];
   deleteFromFs: number[];
 }) {
-  return api.post("/firmware/delete", {
+  return api.post<BulkOperationResponse>("/firmware/delete", {
     firmware: firmware.map((s) => s.id),
     delete_from_fs: deleteFromFs,
   });

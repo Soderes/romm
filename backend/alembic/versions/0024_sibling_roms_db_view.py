@@ -1,4 +1,4 @@
-"""empty message
+"""Create sibling_roms view
 
 Revision ID: 0024_sibling_roms_db_view
 Revises: 0023_make_columns_non_nullable
@@ -20,8 +20,8 @@ depends_on = None
 
 def upgrade() -> None:
     with op.batch_alter_table("roms", schema=None) as batch_op:
-        batch_op.create_index("idx_roms_igdb_id", ["igdb_id"])
-        batch_op.create_index("idx_roms_moby_id", ["moby_id"])
+        batch_op.create_index("idx_roms_igdb_id", ["igdb_id"], if_not_exists=True)
+        batch_op.create_index("idx_roms_moby_id", ["moby_id"], if_not_exists=True)
 
     connection = op.get_bind()
     null_safe_equal_operator = (
@@ -29,8 +29,7 @@ def upgrade() -> None:
     )
 
     connection.execute(
-        sa.text(
-            f"""
+        sa.text(f"""
             CREATE VIEW sibling_roms AS
             SELECT
                 r1.id AS rom_id,
@@ -52,8 +51,7 @@ def upgrade() -> None:
                     OR
                     (r1.moby_id = r2.moby_id AND r1.moby_id IS NOT NULL)
                 );
-            """  # nosec B608
-        ),
+            """),  # nosec B608
     )
 
 
@@ -61,13 +59,11 @@ def downgrade() -> None:
     connection = op.get_bind()
 
     connection.execute(
-        sa.text(
-            """
+        sa.text("""
             DROP VIEW sibling_roms;
-            """
-        ),
+            """),
     )
 
     with op.batch_alter_table("roms", schema=None) as batch_op:
-        batch_op.drop_index("idx_roms_igdb_id")
-        batch_op.drop_index("idx_roms_moby_id")
+        batch_op.drop_index("idx_roms_igdb_id", if_exists=True)
+        batch_op.drop_index("idx_roms_moby_id", if_exists=True)

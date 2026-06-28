@@ -1,7 +1,8 @@
 from collections.abc import Sequence
 from functools import partial
 
-from sqlalchemy import delete, select, update
+import pydash
+from sqlalchemy import case, delete, or_, select, update
 from sqlalchemy.orm import Session
 from sqlalchemy.sql import Delete, Select, Update
 
@@ -16,27 +17,30 @@ class DBScreenshotsHandler(DBBaseHandler):
         self,
         query: QueryT,
         *,
+        rom_id: int,
+        user_id: int,
         filenames: Sequence[str] = (),
-        filenames_no_ext: Sequence[str] = (),
-        rom_ids: Sequence[int] = (),
-        user_ids: Sequence[int] = (),
         exclude_filenames: Sequence[str] = (),
-        exclude_filenames_no_ext: Sequence[str] = (),
     ) -> QueryT:
+        query = query.filter(
+            Screenshot.rom_id == rom_id,
+            Screenshot.user_id == user_id,
+        )
+
         if filenames:
-            query = query.filter(Screenshot.file_name.in_(filenames))
-        if filenames_no_ext:
-            query = query.filter(Screenshot.file_name_no_ext.in_(filenames_no_ext))
-        if rom_ids:
-            query = query.filter(Screenshot.rom_id.in_(rom_ids))
-        if user_ids:
-            query = query.filter(Screenshot.user_id.in_(user_ids))
-        if exclude_filenames:
-            query = query.filter(Screenshot.file_name.not_in(exclude_filenames))
-        if exclude_filenames_no_ext:
             query = query.filter(
-                Screenshot.file_name_no_ext.not_in(exclude_filenames_no_ext)
+                or_(
+                    Screenshot.file_name.in_(filenames),
+                    Screenshot.file_name_no_ext.in_(filenames),
+                )
             )
+
+        if exclude_filenames:
+            query = query.filter(
+                Screenshot.file_name.not_in(exclude_filenames),
+                Screenshot.file_name_no_ext.not_in(exclude_filenames),
+            )
+
         return query
 
     @begin_session
@@ -51,18 +55,22 @@ class DBScreenshotsHandler(DBBaseHandler):
     def get_screenshot(
         self,
         *,
-        filename: str | None = None,
-        filename_no_ext: str | None = None,
-        rom_id: int | None = None,
-        user_id: int | None = None,
+        rom_id: int,
+        user_id: int,
+        file_name: str,
+        file_name_no_ext: str | None = None,
         session: Session = None,  # type: ignore
     ) -> Screenshot | None:
         query = self.filter(
             select(Screenshot),
-            filenames=[filename] if filename is not None else (),
-            filenames_no_ext=[filename_no_ext] if filename_no_ext is not None else (),
-            rom_ids=[rom_id] if rom_id is not None else (),
-            user_ids=[user_id] if user_id is not None else (),
+            rom_id=rom_id,
+            user_id=user_id,
+            filenames=pydash.compact([file_name, file_name_no_ext]),
+        )
+        # Prefer exact stem matches first
+        query = query.order_by(
+            case((Screenshot.file_name_no_ext == file_name, 0), else_=1),
+            Screenshot.id.desc(),
         )
         return session.scalars(query.limit(1)).first()
 
@@ -73,6 +81,33 @@ class DBScreenshotsHandler(DBBaseHandler):
         session: Session = None,  # type: ignore
     ) -> Screenshot | None:
         return session.get(Screenshot, id)
+
+    @begin_session
+    def get_rom_gallery_screenshots(
+        self,
+        rom_id: int,
+        user_id: int,
+        public_only: bool = False,
+        session: Session = None,  # type: ignore
+    ) -> Sequence[Screenshot]:
+        """Gallery (intentionally-uploaded) screenshots for a ROM, visible to
+        the requesting user. Mirrors `db_rom_handler.get_rom_notes`: own
+        screenshots (public + private) plus other users' public ones. Excludes
+        the auto-captured save/state thumbnails (`is_gallery == False`)."""
+        query = select(Screenshot).filter(
+            Screenshot.rom_id == rom_id,
+            Screenshot.is_gallery,
+        )
+
+        if public_only:
+            query = query.filter(Screenshot.is_public)
+        else:
+            query = query.filter(
+                or_(Screenshot.user_id == user_id, Screenshot.is_public)
+            )
+
+        query = query.order_by(Screenshot.created_at.desc())
+        return session.scalars(query).all()
 
     @begin_session
     def update_screenshot(
@@ -111,8 +146,8 @@ class DBScreenshotsHandler(DBBaseHandler):
     ) -> Sequence[Screenshot]:
         query_fn = partial(
             self.filter,
-            rom_ids=[rom_id],
-            user_ids=[user_id],
+            rom_id=rom_id,
+            user_id=user_id,
             exclude_filenames=screenshots_to_keep,
         )
 

@@ -21,19 +21,17 @@ depends_on = None
 
 def upgrade() -> None:
     with op.batch_alter_table("firmware", schema=None) as batch_op:
-        batch_op.add_column(sa.Column("is_verified", sa.Boolean(), nullable=True))
+        batch_op.add_column(
+            sa.Column("is_verified", sa.Boolean(), nullable=True), if_not_exists=True
+        )
 
     # Get all firmware records with their hash information
     connection = op.get_bind()
-    result = connection.execute(
-        sa.text(
-            """
+    result = connection.execute(sa.text("""
         SELECT f.id, p.slug as platform_slug, f.file_name, f.file_size_bytes, f.md5_hash, f.sha1_hash, f.crc_hash
         FROM firmware f
         JOIN platforms p ON f.platform_id = p.id
-        """
-        )
-    )
+        """))
 
     all_firmware = result.fetchall()
     verified_firmware_ids = []
@@ -85,4 +83,4 @@ def upgrade() -> None:
 
 def downgrade() -> None:
     with op.batch_alter_table("firmware", schema=None) as batch_op:
-        batch_op.drop_column("is_verified")
+        batch_op.drop_column("is_verified", if_exists=True)

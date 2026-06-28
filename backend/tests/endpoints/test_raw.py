@@ -1,13 +1,4 @@
-import pytest
 from fastapi import status
-from fastapi.testclient import TestClient
-from main import app
-
-
-@pytest.fixture
-def client():
-    with TestClient(app) as client:
-        yield client
 
 
 def test_get_raw_asset(client, access_token):
@@ -22,4 +13,7 @@ def test_get_raw_asset(client, access_token):
     )
     assert response.status_code == status.HTTP_200_OK
     assert "SUPER_MARIO_64_SAVE_FILE" in response.text
-    assert response.headers["content-type"] == "text/plain; charset=utf-8"
+    # Non-image assets must be served as an opaque download to prevent stored XSS
+    # from any user-controlled file (e.g. an HTML uploaded as an avatar).
+    assert response.headers["content-type"] == "application/octet-stream"
+    assert response.headers["content-disposition"].startswith("attachment;")

@@ -1,35 +1,51 @@
-import type { SaveSchema } from "@/__generated__";
+import type {
+  Body_add_save_api_saves_post as AddSaveInput,
+  Body_update_save_api_saves__id__put as UpdateSaveInput,
+  DetailedRomSchema,
+  SaveSchema,
+} from "@/__generated__";
 import api from "@/services/api";
-import type { DetailedRom } from "@/stores/roms";
+import { buildFormInput } from "@/utils/formData";
 
 export const saveApi = api;
+
+type SaveUploadInput = Omit<AddSaveInput, "saveFile" | "screenshotFile"> & {
+  saveFile: File;
+  screenshotFile?: File;
+};
+
+type UpdateSaveUploadInput = Omit<
+  UpdateSaveInput,
+  "saveFile" | "screenshotFile"
+> & {
+  saveFile: File;
+  screenshotFile?: File;
+};
 
 async function uploadSaves({
   rom,
   savesToUpload,
   emulator,
+  deviceId,
 }: {
-  rom: DetailedRom;
-  savesToUpload: {
-    saveFile: File;
-    screenshotFile?: File;
-  }[];
+  rom: DetailedRomSchema;
+  savesToUpload: SaveUploadInput[];
   emulator?: string;
-}): Promise<PromiseSettledResult<SaveSchema>[]> {
+  deviceId?: string;
+}) {
   const promises = savesToUpload.map(({ saveFile, screenshotFile }) => {
-    const formData = new FormData();
-    formData.append("saveFile", saveFile);
-    if (screenshotFile) {
-      formData.append("screenshotFile", screenshotFile);
-    }
+    const formData = buildFormInput<SaveUploadInput>([
+      ["saveFile", saveFile],
+      ["screenshotFile", screenshotFile],
+    ]);
 
     return new Promise<SaveSchema>((resolve, reject) => {
       api
-        .post("/saves", formData, {
+        .post<SaveSchema>("/saves", formData, {
           headers: {
             "Content-Type": "multipart/form-data",
           },
-          params: { rom_id: rom.id, emulator },
+          params: { rom_id: rom.id, emulator, device_id: deviceId },
         })
         .then(({ data }) => {
           resolve(data);
@@ -45,25 +61,36 @@ async function updateSave({
   save,
   saveFile,
   screenshotFile,
+  deviceId,
 }: {
   save: SaveSchema;
-  saveFile: File;
-  screenshotFile?: File;
-}): Promise<{ data: SaveSchema }> {
-  const formData = new FormData();
-  formData.append("saveFile", saveFile);
-  if (screenshotFile) formData.append("screenshotFile", screenshotFile);
+  saveFile: UpdateSaveUploadInput["saveFile"];
+  screenshotFile?: UpdateSaveUploadInput["screenshotFile"];
+  deviceId?: string;
+}) {
+  const formData = buildFormInput<UpdateSaveUploadInput>([
+    ["saveFile", saveFile],
+    ["screenshotFile", screenshotFile],
+  ]);
 
-  return api.put(`/saves/${save.id}`, formData);
+  return api.put<SaveSchema>(`/saves/${save.id}`, formData, {
+    params: { device_id: deviceId },
+  });
 }
 
-async function deleteSaves({
-  saves,
+async function deleteSaves({ saves }: { saves: SaveSchema[] }) {
+  return api.post<number[]>("/saves/delete", { saves: saves.map((s) => s.id) });
+}
+
+async function setSaveVisibility({
+  id,
+  isPublic,
 }: {
-  saves: SaveSchema[];
-}): Promise<{ data: number[] }> {
-  return api.post("/saves/delete", {
-    saves: saves.map((s) => s.id),
+  id: number;
+  isPublic: boolean;
+}) {
+  return api.put<SaveSchema>(`/saves/${id}/visibility`, {
+    is_public: isPublic,
   });
 }
 
@@ -71,4 +98,5 @@ export default {
   uploadSaves,
   updateSave,
   deleteSaves,
+  setSaveVisibility,
 };

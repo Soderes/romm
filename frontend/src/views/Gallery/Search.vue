@@ -99,31 +99,25 @@ function onGameTouchEnd() {
 }
 
 function fetchRoms() {
-  romsStore
-    .fetchRoms({ galleryFilter: galleryFilterStore })
-    .catch((error) => {
-      emitter?.emit("snackbarShow", {
-        msg: `Couldn't fetch roms: ${error}`,
-        icon: "mdi-close-circle",
-        color: "red",
-        timeout: 4000,
-      });
-    })
-    .finally(() => {
-      galleryFilterStore.activeFilterDrawer = false;
+  romsStore.fetchRoms().catch((error) => {
+    emitter?.emit("snackbarShow", {
+      msg: `Couldn't fetch roms: ${error}`,
+      icon: "mdi-close-circle",
+      color: "red",
+      timeout: 4000,
     });
+  });
 }
 
-const { y: documentY } = useScroll(document.body, { throttle: 500 });
+const { y: windowY } = useScroll(window, { throttle: 500 });
 
-watch(documentY, () => {
+watch(windowY, () => {
   clearTimeout(timeout);
 
   window.setTimeout(async () => {
-    scrolledToTop.value = documentY.value === 0;
+    scrolledToTop.value = windowY.value === 0;
     if (
-      documentY.value + window.innerHeight >=
-        document.body.scrollHeight - 300 &&
+      windowY.value + window.innerHeight >= document.body.scrollHeight - 300 &&
       fetchTotalRoms.value > filteredRoms.value.length
     ) {
       await fetchRoms();
@@ -133,6 +127,7 @@ watch(documentY, () => {
 
 onMounted(async () => {
   scrolledToTop.value = true;
+  fetchRoms();
 });
 
 onUnmounted(() => {
@@ -151,7 +146,7 @@ onUnmounted(() => {
         <v-col
           v-for="rom in filteredRoms"
           :key="rom.id"
-          class="pa-1 align-self-end"
+          class="pa-1 align-self-center"
           :cols="views[currentView]['size-cols']"
           :sm="views[currentView]['size-sm']"
           :md="views[currentView]['size-md']"

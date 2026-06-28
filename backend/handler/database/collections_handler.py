@@ -1,9 +1,18 @@
 import functools
 from collections.abc import Sequence
+from datetime import datetime, timezone
 from typing import Any
 
 from sqlalchemy import delete, insert, literal, or_, select, update
-from sqlalchemy.orm import Query, Session, noload, selectinload
+from sqlalchemy.exc import IntegrityError
+from sqlalchemy.orm import (
+    Query,
+    QueryableAttribute,
+    Session,
+    load_only,
+    noload,
+    selectinload,
+)
 
 from decorators.database import begin_session
 from models.collection import (
@@ -85,9 +94,17 @@ class DBCollectionsHandler(DBBaseHandler):
     @with_roms
     def get_collections(
         self,
+        updated_after: datetime | None = None,
+        only_fields: Sequence[QueryableAttribute] | None = None,
         query: Query = None,  # type: ignore
         session: Session = None,  # type: ignore
     ) -> Sequence[Collection]:
+        if updated_after:
+            query = query.filter(Collection.updated_at > updated_after)
+
+        if only_fields:
+            query = query.options(load_only(*only_fields))
+
         return session.scalars(query.order_by(Collection.name.asc())).unique().all()
 
     @begin_session
@@ -114,12 +131,87 @@ class DBCollectionsHandler(DBBaseHandler):
             )
             # Insert new CollectionRom entries for this collection
             if rom_ids:
+                # Filter out rom_ids that no longer exist in the roms table to
+                # avoid foreign key constraint violations (e.g. after a rescan)
+                valid_rom_ids = set(
+                    session.scalars(select(Rom.id).where(Rom.id.in_(rom_ids))).all()
+                )
+                if valid_rom_ids:
+                    session.execute(
+                        insert(CollectionRom),
+                        [
+                            {"collection_id": id, "rom_id": rom_id}
+                            for rom_id in valid_rom_ids
+                        ],
+                    )
+
+        return session.scalar(query.filter_by(id=id).limit(1))
+
+    @begin_session
+    @with_roms
+    def add_roms_to_collection(
+        self,
+        id: int,
+        rom_ids: list[int],
+        query: Query = None,  # type: ignore
+        session: Session = None,  # type: ignore
+    ) -> Collection:
+        if rom_ids:
+            valid_rom_ids = set(
+                session.scalars(select(Rom.id).where(Rom.id.in_(rom_ids))).all()
+            )
+            existing_ids = set(
+                session.scalars(
+                    select(CollectionRom.rom_id).where(
+                        CollectionRom.collection_id == id
+                    )
+                ).all()
+            )
+            new_ids = valid_rom_ids - existing_ids
+            if new_ids:
+                try:
+                    with session.begin_nested():
+                        session.execute(
+                            insert(CollectionRom),
+                            [
+                                {"collection_id": id, "rom_id": rom_id}
+                                for rom_id in new_ids
+                            ],
+                        )
+                except IntegrityError:
+                    # Concurrent request inserted the same rows; data is consistent
+                    pass
                 session.execute(
-                    insert(CollectionRom),
-                    [
-                        {"collection_id": id, "rom_id": rom_id}
-                        for rom_id in set(rom_ids)
-                    ],
+                    update(Collection)
+                    .where(Collection.id == id)
+                    .values(updated_at=datetime.now(timezone.utc))
+                    .execution_options(synchronize_session="evaluate")
+                )
+
+        return session.scalar(query.filter_by(id=id).limit(1))
+
+    @begin_session
+    @with_roms
+    def remove_roms_from_collection(
+        self,
+        id: int,
+        rom_ids: list[int],
+        query: Query = None,  # type: ignore
+        session: Session = None,  # type: ignore
+    ) -> Collection:
+        if rom_ids:
+            result = session.execute(
+                delete(CollectionRom).where(
+                    CollectionRom.collection_id == id,
+                    CollectionRom.rom_id.in_(rom_ids),
+                )
+            )
+            if result.rowcount > 0:
+                session.execute(
+                    update(Collection)
+                    .where(Collection.id == id)
+                    .values(updated_at=datetime.now(timezone.utc))
+                    .execution_options(synchronize_session="evaluate")
                 )
 
         return session.scalar(query.filter_by(id=id).limit(1))
@@ -153,18 +245,20 @@ class DBCollectionsHandler(DBBaseHandler):
         self,
         type: str,
         limit: int | None = None,
+        only_fields: Sequence[QueryableAttribute] | None = None,
         session: Session = None,  # type: ignore
     ) -> Sequence[VirtualCollection]:
-        return (
-            session.scalars(
-                select(VirtualCollection)
-                .filter(or_(VirtualCollection.type == type, literal(type == "all")))
-                .limit(limit)
-                .order_by(VirtualCollection.name.asc())
-            )
-            .unique()
-            .all()
+        query = (
+            select(VirtualCollection)
+            .filter(or_(VirtualCollection.type == type, literal(type == "all")))
+            .limit(limit)
+            .order_by(VirtualCollection.name.asc())
         )
+
+        if only_fields:
+            query = query.options(load_only(*only_fields))
+
+        return session.scalars(query).unique().all()
 
     # Smart collections
     @begin_session
@@ -201,6 +295,8 @@ class DBCollectionsHandler(DBBaseHandler):
     def get_smart_collections(
         self,
         user_id: int | None = None,
+        updated_after: datetime | None = None,
+        only_fields: Sequence[QueryableAttribute] | None = None,
         session: Session = None,  # type: ignore
     ) -> Sequence[SmartCollection]:
         query = select(SmartCollection).order_by(SmartCollection.name.asc())
@@ -210,6 +306,12 @@ class DBCollectionsHandler(DBBaseHandler):
             query = query.filter(
                 (SmartCollection.user_id == user_id) | SmartCollection.is_public
             )
+
+        if updated_after:
+            query = query.filter(SmartCollection.updated_at > updated_after)
+
+        if only_fields:
+            query = query.options(load_only(*only_fields))
 
         return session.scalars(query).unique().all()
 
@@ -250,9 +352,33 @@ class DBCollectionsHandler(DBBaseHandler):
         # Extract filter criteria
         criteria = smart_collection.filter_criteria
 
+        # Convert legacy single-value criteria to arrays for backward compatibility
+        def convert_legacy_filter(new_key: str, old_key: str) -> list[str] | None:
+            """Convert legacy single-value filter to array format."""
+            if new_value := criteria.get(new_key):
+                return new_value if isinstance(new_value, list) else [new_value]
+            if old_value := criteria.get(old_key):
+                return old_value if isinstance(old_value, list) else [old_value]
+            return None
+
+        # Apply conversions
+        genres = convert_legacy_filter("genres", "selected_genre")
+        franchises = convert_legacy_filter("franchises", "selected_franchise")
+        collections = convert_legacy_filter("collections", "selected_collection")
+        companies = convert_legacy_filter("companies", "selected_company")
+        age_ratings = convert_legacy_filter("age_ratings", "selected_age_rating")
+        regions = convert_legacy_filter("regions", "selected_region")
+        languages = convert_legacy_filter("languages", "selected_language")
+        statuses = convert_legacy_filter("statuses", "selected_status")
+
         # Use the existing filter_roms method with the stored criteria
+        platform_ids = criteria.get("platform_ids")
+        if platform_ids is None:
+            if platform_id := criteria.get("platform_id"):
+                platform_ids = [platform_id]
+
         return db_rom_handler.get_roms_scalar(
-            platform_id=criteria.get("platform_id"),
+            platform_ids=platform_ids,
             collection_id=criteria.get("collection_id"),
             virtual_collection_id=criteria.get("virtual_collection_id"),
             search_term=criteria.get("search_term"),
@@ -263,14 +389,23 @@ class DBCollectionsHandler(DBBaseHandler):
             has_ra=criteria.get("has_ra"),
             missing=criteria.get("missing"),
             verified=criteria.get("verified"),
-            selected_genre=criteria.get("selected_genre"),
-            selected_franchise=criteria.get("selected_franchise"),
-            selected_collection=criteria.get("selected_collection"),
-            selected_company=criteria.get("selected_company"),
-            selected_age_rating=criteria.get("selected_age_rating"),
-            selected_status=criteria.get("selected_status"),
-            selected_region=criteria.get("selected_region"),
-            selected_language=criteria.get("selected_language"),
+            genres=genres,
+            franchises=franchises,
+            collections=collections,
+            companies=companies,
+            age_ratings=age_ratings,
+            statuses=statuses,
+            regions=regions,
+            languages=languages,
+            # Logic operators for multi-value filters
+            genres_logic=criteria.get("genres_logic", "any"),
+            franchises_logic=criteria.get("franchises_logic", "any"),
+            collections_logic=criteria.get("collections_logic", "any"),
+            companies_logic=criteria.get("companies_logic", "any"),
+            age_ratings_logic=criteria.get("age_ratings_logic", "any"),
+            regions_logic=criteria.get("regions_logic", "any"),
+            languages_logic=criteria.get("languages_logic", "any"),
+            statuses_logic=criteria.get("statuses_logic", "any"),
             user_id=user_id,
             order_by=criteria.get("order_by", "name"),
             order_dir=criteria.get("order_dir", "asc"),

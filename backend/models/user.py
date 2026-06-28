@@ -21,7 +21,10 @@ from utils.database import CustomJSON
 
 if TYPE_CHECKING:
     from models.assets import Save, Screenshot, State
+    from models.client_token import ClientToken
     from models.collection import Collection, SmartCollection
+    from models.device import Device
+    from models.play_session import PlaySession
     from models.rom import RomNote, RomUser
 
 
@@ -62,6 +65,9 @@ class User(BaseModel, SimpleUser):
     ra_progression: Mapped[dict[str, Any] | None] = mapped_column(
         CustomJSON(), default=dict
     )
+    ui_settings: Mapped[dict[str, Any] | None] = mapped_column(
+        CustomJSON(), default=dict
+    )
 
     saves: Mapped[list[Save]] = relationship(lazy="raise", back_populates="user")
     states: Mapped[list[State]] = relationship(lazy="raise", back_populates="user")
@@ -75,6 +81,15 @@ class User(BaseModel, SimpleUser):
     )
     smart_collections: Mapped[list["SmartCollection"]] = relationship(
         lazy="raise", back_populates="user"
+    )
+    devices: Mapped[list["Device"]] = relationship(
+        lazy="raise", back_populates="user", cascade="all, delete-orphan"
+    )
+    client_tokens: Mapped[list["ClientToken"]] = relationship(
+        lazy="raise", back_populates="user", cascade="all, delete-orphan"
+    )
+    play_sessions: Mapped[list["PlaySession"]] = relationship(
+        lazy="raise", back_populates="user", cascade="all, delete-orphan"
     )
 
     @classmethod

@@ -11,6 +11,7 @@ import {
   useTemplateRef,
 } from "vue";
 import { useDisplay } from "vuetify";
+import type { VImg } from "vuetify/lib/components/VImg/VImg.js";
 import type { BoxartStyleOption } from "@/components/Settings/UserInterface/Interface.vue";
 import ActionBar from "@/components/common/Game/Card/ActionBar.vue";
 import Flags from "@/components/common/Game/Card/Flags.vue";
@@ -18,6 +19,7 @@ import Skeleton from "@/components/common/Game/Card/Skeleton.vue";
 import Sources from "@/components/common/Game/Card/Sources.vue";
 import MissingFromFSIcon from "@/components/common/MissingFromFSIcon.vue";
 import PlatformIcon from "@/components/common/Platform/PlatformIcon.vue";
+import RDialog from "@/components/common/RDialog.vue";
 import { useGameAnimation } from "@/composables/useGameAnimation";
 import { ROUTES } from "@/plugins/router";
 import storeCollections from "@/stores/collections";
@@ -82,6 +84,7 @@ const { smAndDown } = useDisplay();
 const romsStore = storeRoms();
 const activeMenu = ref(false);
 const gameIsHovering = ref(false);
+const showCoverZoom = ref(false);
 const emitter = inject<Emitter<Events>>("emitter");
 emitter?.on("playGame", handlePlayGame);
 
@@ -130,7 +133,7 @@ const showActionBarAlways = useLocalStorage("settings.showActionBar", false);
 const showGameTitleAlways = useLocalStorage("settings.showGameTitle", false);
 const showSiblings = useLocalStorage("settings.showSiblings", true);
 const tiltCardRef = useTemplateRef<TiltHTMLElement>("tilt-card-ref");
-const coverRef = useTemplateRef("game-image-ref");
+const coverRef = useTemplateRef<VImg>("game-image-ref");
 const videoRef = useTemplateRef<HTMLVideoElement>("hover-video-ref");
 
 const {
@@ -154,17 +157,8 @@ const {
   forceBoxart: props.forceBoxart,
 });
 
-const hasNotes = computed(() => {
-  // TODO: Add note count to SimpleRom or check all_user_notes
-  // For now, return false until we implement proper note counting
-  return false;
-});
-
 const computedAspectRatio = computed(() => {
-  return galleryViewStore.getAspectRatio({
-    platformId: props.rom.platform_id,
-    boxartStyle: boxartStyle.value,
-  });
+  return galleryViewStore.getAspectRatio({ boxartStyle: boxartStyle.value });
 });
 
 const fallbackCoverImage = computed(() =>
@@ -267,7 +261,7 @@ onBeforeUnmount(() => {
               }
             : {}),
         }"
-        :variant="boxartStyle === 'cover_path' ? 'elevated' : 'flat'"
+        variant="flat"
         class="game-card bg-transparent"
         :class="{
           'transform-scale':
@@ -284,8 +278,7 @@ onBeforeUnmount(() => {
           <v-img
             ref="game-image-ref"
             :key="romsStore.isSimpleRom(rom) ? rom.id : rom.name"
-            :cover="!boxartStyleCover"
-            :contain="boxartStyleCover"
+            :cover="false"
             content-class="d-flex flex-column justify-space-between"
             :class="{
               pointer: pointerOnHover,
@@ -293,18 +286,27 @@ onBeforeUnmount(() => {
               transitioning: !isVideoPlaying,
             }"
             :src="largeCover || fallbackCoverImage"
-            :aspect-ratio="computedAspectRatio"
             @click="handleClick"
             @touchstart="handleTouchStart"
             @touchend="handleTouchEnd"
           >
+            <v-fade-transition>
+              <v-btn
+                v-if="isOuterHovering && !pointerOnHover"
+                icon="mdi-magnify-plus-outline"
+                size="x-small"
+                class="cover-zoom-btn position-absolute"
+                variant="flat"
+                @click.stop="showCoverZoom = true"
+              />
+            </v-fade-transition>
             <template v-if="titleOnHover">
               <v-expand-transition>
                 <div
                   v-if="
                     isOuterHovering ||
                     showGameTitleAlways ||
-                    (romsStore.isSimpleRom(rom) && !rom.path_cover_large) ||
+                    (romsStore.isSimpleRom(rom) && !largeCover) ||
                     (!romsStore.isSimpleRom(rom) &&
                       !rom.igdb_url_cover &&
                       !rom.moby_url_cover &&
@@ -313,7 +315,7 @@ onBeforeUnmount(() => {
                       !rom.launchbox_url_cover &&
                       !rom.flashpoint_url_cover)
                   "
-                  class="translucent text-white"
+                  class="translucent"
                   :class="
                     sizeActionBar === 1 ? 'text-subtitle-1' : 'text-caption'
                   "
@@ -333,7 +335,7 @@ onBeforeUnmount(() => {
                 </div>
               </v-expand-transition>
             </template>
-            <v-row no-gutters class="text-white px-1">
+            <v-row no-gutters class="px-1">
               <v-col>
                 <Sources v-if="!romsStore.isSimpleRom(rom)" :rom="rom" />
                 <Flags
@@ -365,17 +367,17 @@ onBeforeUnmount(() => {
                   />
                   <v-chip
                     v-if="rom.hasheous_id"
-                    class="translucent text-white mr-1 mb-1 px-1"
+                    class="translucent mr-1 mb-1 px-1"
                     density="compact"
                     title="Verified with Hasheous"
                   >
                     <v-icon>mdi-check-decagram-outline</v-icon>
                   </v-chip>
                   <v-chip
-                    v-if="rom.siblings.length > 0 && showSiblings"
-                    class="translucent text-white mr-1 mb-1 px-1"
+                    v-if="rom.sibling_roms.length > 0 && showSiblings"
+                    class="translucent mr-1 mb-1 px-1"
                     density="compact"
-                    :title="`${rom.siblings.length} sibling(s)`"
+                    :title="`${rom.sibling_roms.length} sibling(s)`"
                   >
                     <v-icon>mdi-card-multiple-outline</v-icon>
                   </v-chip>
@@ -384,13 +386,13 @@ onBeforeUnmount(() => {
                     text="Favorite"
                     color="secondary"
                     density="compact"
-                    class="translucent text-white mr-1 mb-1 px-1"
+                    class="translucent mr-1 mb-1 px-1"
                   >
                     <v-icon>mdi-star</v-icon>
                   </v-chip>
                   <v-chip
-                    v-if="hasNotes && showChips"
-                    class="translucent text-white mr-1 mb-1 px-1"
+                    v-if="rom.has_notes && showChips"
+                    class="translucent mr-1 mb-1 px-1"
                     density="compact"
                     title="View notes"
                     @click.stop="showNoteDialog"
@@ -422,25 +424,18 @@ onBeforeUnmount(() => {
             </div>
             <template #placeholder>
               <v-img
-                :cover="!boxartStyleCover"
-                :contain="boxartStyleCover"
+                :cover="false"
                 eager
                 :src="smallCover || fallbackCoverImage"
-                :aspect-ratio="computedAspectRatio"
               >
                 <template #placeholder>
-                  <Skeleton
-                    :platform-id="rom.platform_id"
-                    :aspect-ratio="computedAspectRatio"
-                    type="image"
-                  />
+                  <Skeleton :aspect-ratio="computedAspectRatio" type="image" />
                 </template>
               </v-img>
             </template>
             <template #error>
               <v-img
-                :cover="!boxartStyleCover"
-                :contain="boxartStyleCover"
+                :cover="false"
                 eager
                 :src="fallbackCoverImage"
                 :aspect-ratio="computedAspectRatio"
@@ -474,6 +469,27 @@ onBeforeUnmount(() => {
       </v-card>
     </div>
   </v-hover>
+
+  <r-dialog v-model="showCoverZoom" :width="500" icon="mdi-image">
+    <template #header>
+      {{ rom.name }}
+    </template>
+    <template #content>
+      <v-img
+        :src="largeCover || fallbackCoverImage"
+        :alt="rom.name || 'Cover'"
+        contain
+        max-height="70vh"
+        class="pa-2"
+      >
+        <template #placeholder>
+          <div class="d-flex justify-center align-center h-100">
+            <v-progress-circular indeterminate />
+          </div>
+        </template>
+      </v-img>
+    </template>
+  </r-dialog>
 </template>
 
 <style scoped>
@@ -507,6 +523,13 @@ onBeforeUnmount(() => {
 .append-inner-right {
   bottom: 0rem;
   right: 0rem;
+}
+
+.cover-zoom-btn {
+  top: 0.25rem;
+  right: 0.25rem;
+  opacity: 0.85;
+  z-index: 1;
 }
 
 .v-chip:hover {

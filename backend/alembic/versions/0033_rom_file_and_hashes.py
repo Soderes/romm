@@ -1,4 +1,4 @@
-"""empty message
+"""Introduce rom_files table and refactor roms table
 
 Revision ID: 0033_rom_file_and_hashes
 Revises: 0032_longer_fs_fields
@@ -79,11 +79,11 @@ def upgrade() -> None:
         ),
         sa.ForeignKeyConstraint(["rom_id"], ["roms.id"], ondelete="CASCADE"),
         sa.PrimaryKeyConstraint("id"),
+        if_not_exists=True,
     )
 
     if is_postgresql(connection):
-        op.execute(
-            """
+        op.execute("""
             INSERT INTO rom_files (
                 rom_id,
                 file_name,
@@ -107,11 +107,9 @@ def upgrade() -> None:
             CROSS JOIN jsonb_array_elements(r.files) AS file_data
             WHERE file_data->>'filename' IS NOT NULL
             AND file_data->>'filename' <> '';
-            """
-        )
+            """)
     else:
-        op.execute(
-            """
+        op.execute("""
             INSERT INTO rom_files (
                 rom_id,
                 file_name,
@@ -142,8 +140,7 @@ def upgrade() -> None:
             ) AS extracted_files
             WHERE JSON_UNQUOTE(JSON_EXTRACT(file_data, '$.filename')) IS NOT NULL
             AND JSON_UNQUOTE(JSON_EXTRACT(file_data, '$.filename')) <> '';
-            """
-        )
+            """)
 
     with op.batch_alter_table("roms", schema=None) as batch_op:
         batch_op.alter_column(
@@ -167,9 +164,9 @@ def upgrade() -> None:
         batch_op.alter_column(
             "file_path", new_column_name="fs_path", existing_type=sa.String(length=1000)
         )
-        batch_op.drop_column("files")
-        batch_op.drop_column("multi")
-        batch_op.drop_column("file_size_bytes")
+        batch_op.drop_column("files", if_exists=True)
+        batch_op.drop_column("multi", if_exists=True)
+        batch_op.drop_column("file_size_bytes", if_exists=True)
 
 
 def downgrade() -> None:
@@ -177,14 +174,18 @@ def downgrade() -> None:
 
     with op.batch_alter_table("roms", schema=None) as batch_op:
         batch_op.add_column(
-            sa.Column("multi", sa.Boolean(), nullable=False, server_default="0")
+            sa.Column("multi", sa.Boolean(), nullable=False, server_default="0"),
+            if_not_exists=True,
         )
         batch_op.alter_column("multi", server_default=None)
-        batch_op.add_column(sa.Column("files", CustomJSON(), nullable=True))
+        batch_op.add_column(
+            sa.Column("files", CustomJSON(), nullable=True), if_not_exists=True
+        )
         batch_op.add_column(
             sa.Column(
                 "file_size_bytes", sa.BigInteger(), nullable=False, server_default="0"
-            )
+            ),
+            if_not_exists=True,
         )
         batch_op.alter_column("file_size_bytes", server_default=None)
         batch_op.alter_column(
@@ -210,8 +211,7 @@ def downgrade() -> None:
         )
 
     if is_postgresql(connection):
-        op.execute(
-            """
+        op.execute("""
             WITH aggregated_data AS (
                 SELECT
                     rom_id,
@@ -234,11 +234,9 @@ def downgrade() -> None:
                 file_size_bytes = aggregated_data.total_size
             FROM aggregated_data
             WHERE roms.id = aggregated_data.rom_id;
-            """
-        )
+            """)
     else:
-        op.execute(
-            """
+        op.execute("""
             UPDATE roms
             JOIN (
                 SELECT
@@ -260,10 +258,9 @@ def downgrade() -> None:
                 roms.files = aggregated_data.files,
                 roms.multi = aggregated_data.multi,
                 roms.file_size_bytes = aggregated_data.total_size;
-            """
-        )
+            """)
 
-    op.drop_table("rom_files")
+    op.drop_table("rom_files", if_exists=True)
 
     if is_postgresql(connection):
         ENUM(name="romfilecategory").drop(connection, checkfirst=False)
